@@ -12,10 +12,6 @@ import {
   Alert,
   AlertDescription,
   CurrencyInput,
-  Label,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
   ResponsiveSelect,
   type ResponsiveSelectOption,
   SearchableSelect,
@@ -24,7 +20,6 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  Switch,
 } from "@wealthfolio/ui";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -80,6 +75,7 @@ function getOverrideTypeForKind(kind: string): "equity_symbol" | "crypto_symbol"
 const QuoteMode = {
   MARKET: "MARKET",
   MANUAL: "MANUAL",
+  INTERNAL_YTM: "INTERNAL_YTM",
 } as const;
 
 type QuoteMode = (typeof QuoteMode)[keyof typeof QuoteMode];
@@ -90,9 +86,26 @@ const assetFormSchema = z.object({
   instrumentType: z.string().optional(),
   quoteCcy: z.string().min(1, "Currency is required"),
   instrumentExchangeMic: z.string().optional(),
-  quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]),
+  quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL, QuoteMode.INTERNAL_YTM]),
   preferredProvider: z.string().optional(),
   providerConfig: z.array(providerOverrideSchema).optional(),
+  bond: z
+    .object({
+      maturityDate: z.string().optional(),
+      couponRate: z.coerce.number().min(0).max(100).optional(),
+      faceValue: z.coerce.number().positive().optional(),
+      couponFrequency: z.string().optional(),
+      isin: z.string().optional(),
+      ytmSource: z.string().optional(),
+      ytmFixedValue: z.coerce.number().min(0).max(100).optional(),
+      ytmSpreadBps: z.coerce.number().optional(),
+      dayCountConvention: z.string().optional(),
+      settlementDays: z.coerce.number().int().min(0).optional(),
+      pricingMethod: z.string().optional(),
+      couponSchedule: z.string().optional(),
+      firstCouponDate: z.string().optional(),
+    })
+    .optional(),
 });
 
 type AssetFormValues = z.infer<typeof assetFormSchema>;
@@ -138,6 +151,137 @@ function parsePreferredProvider(
   return typeof pref === "string" ? pref : undefined;
 }
 
+// Parse BondSpec from asset.metadata.bond (values stored as decimals, displayed as %)
+function parseBondSpec(bondData: unknown): AssetFormValues["bond"] {
+  if (!bondData || typeof bondData !== "object") return undefined;
+  const b = bondData as Record<string, unknown>;
+  const toDisplayPct = (v: unknown) =>
+    typeof v === "number" ? Math.round(v * 100 * 1e8) / 1e8 : undefined;
+  return {
+    maturityDate: typeof b.maturityDate === "string" ? b.maturityDate : undefined,
+    couponRate: toDisplayPct(b.couponRate),
+    faceValue: typeof b.faceValue === "number" ? b.faceValue : undefined,
+    couponFrequency: typeof b.couponFrequency === "string" ? b.couponFrequency : undefined,
+    isin: typeof b.isin === "string" ? b.isin : undefined,
+    ytmSource: typeof b.ytmSource === "string" ? b.ytmSource : undefined,
+    ytmFixedValue: toDisplayPct(b.ytmFixedValue),
+    ytmSpreadBps: typeof b.ytmSpreadBps === "number" ? b.ytmSpreadBps : undefined,
+    dayCountConvention:
+      typeof b.dayCountConvention === "string" ? b.dayCountConvention : undefined,
+    settlementDays: typeof b.settlementDays === "number" ? b.settlementDays : undefined,
+    pricingMethod: typeof b.pricingMethod === "string" ? b.pricingMethod : undefined,
+    couponSchedule: typeof b.couponSchedule === "string" ? b.couponSchedule : undefined,
+    firstCouponDate: typeof b.firstCouponDate === "string" ? b.firstCouponDate : undefined,
+  };
+}
+
+// Serialize bond form values back to metadata.bond (convert display % to decimal)
+function serializeBondSpec(bond: NonNullable<AssetFormValues["bond"]>): Record<string, unknown> {
+  const toDecimal = (v: number | undefined) => (v != null ? v / 100 : null);
+  // If a first_coupon_date is provided, derive the schedule from it so the
+  // pricing engine can run even when the user never manually fills the
+  // comma-separated schedule field.
+  const derivedSchedule = generateCouponSchedule(
+    bond.firstCouponDate ?? null,
+    bond.couponFrequency ?? null,
+    bond.maturityDate ?? null,
+  );
+  const couponSchedule =
+    bond.couponSchedule && bond.couponSchedule.trim().length > 0
+      ? bond.couponSchedule
+      : derivedSchedule.length > 0
+        ? derivedSchedule.join(",")
+        : null;
+  return {
+    maturityDate: bond.maturityDate ?? null,
+    couponRate: toDecimal(bond.couponRate),
+    faceValue: bond.faceValue ?? null,
+    couponFrequency: bond.couponFrequency ?? null,
+    isin: bond.isin ?? null,
+    ytmSource: bond.ytmSource ?? null,
+    ytmFixedValue: toDecimal(bond.ytmFixedValue),
+    ytmSpreadBps: bond.ytmSpreadBps ?? null,
+    dayCountConvention: bond.dayCountConvention ?? null,
+    settlementDays: bond.settlementDays ?? null,
+    pricingMethod: bond.pricingMethod ?? null,
+    couponSchedule,
+    firstCouponDate: bond.firstCouponDate ?? null,
+  };
+}
+
+/**
+ * Derive coupon-payment dates from `(firstCouponDate, frequency, maturityDate)`.
+ * Returns an empty array if any input is missing or unparseable. The day of
+ * month is taken from `firstCouponDate`; months that have fewer days clamp
+ * the day to the month's last day. The maturity date is appended as the
+ * final coupon anchor when it falls strictly after the last derived date.
+ */
+export function generateCouponSchedule(
+  firstCouponDateStr: string | null | undefined,
+  frequency: string | null | undefined,
+  maturityDateStr: string | null | undefined,
+): string[] {
+  if (!firstCouponDateStr || !frequency || !maturityDateStr) return [];
+  const firstDate = parseISODate(firstCouponDateStr);
+  const maturityDate = parseISODate(maturityDateStr);
+  if (!firstDate || !maturityDate) return [];
+  const monthsPerPeriod: Record<string, number> = {
+    ANNUAL: 12,
+    SEMI_ANNUAL: 6,
+    QUARTERLY: 3,
+    MONTHLY: 1,
+  };
+  const months = monthsPerPeriod[frequency.toUpperCase()];
+  if (!months) return [];
+
+  const out: string[] = [];
+  let i = 0;
+  while (true) {
+    const d = addMonthsClamped(firstDate, i * months);
+    if (d > maturityDate) break;
+    out.push(formatISODate(d));
+    i += 1;
+    // Hard guard against runaway loops
+    if (out.length > 2000) break;
+  }
+  // Ensure maturity date is included as the final cash-flow anchor
+  const lastIso = out[out.length - 1];
+  const maturityIso = formatISODate(maturityDate);
+  if (lastIso !== maturityIso) {
+    out.push(maturityIso);
+  }
+  return out;
+}
+
+function parseISODate(s: string): Date | null {
+  // Use UTC to avoid local timezone shifting the day
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function formatISODate(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function addMonthsClamped(date: Date, months: number): Date {
+  const targetMonth = date.getUTCMonth() + months;
+  const year = date.getUTCFullYear() + Math.floor(targetMonth / 12);
+  const monthIdx = ((targetMonth % 12) + 12) % 12;
+  // Last day of target month
+  const lastDay = new Date(Date.UTC(year, monthIdx + 1, 0)).getUTCDate();
+  const day = Math.min(date.getUTCDate(), lastDay);
+  return new Date(Date.UTC(year, monthIdx, day));
+}
+
 // Serialize form values to nested provider config JSON
 function serializeProviderConfig(
   preferredProvider: string | undefined,
@@ -164,84 +308,6 @@ function serializeProviderConfig(
 }
 
 type EditTab = "general" | "classification" | "market-data" | "fx-settings";
-
-// Extracted component for pricing mode toggle with controlled popover
-// Uses "Automatic Updates" toggle: ON = automatic, OFF = manual (more intuitive)
-function PricingModeToggle({
-  isManualMode,
-  onConfirm,
-}: {
-  isManualMode: boolean;
-  onConfirm: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const isAutomatic = !isManualMode;
-
-  return (
-    <div className="rounded-lg border p-4">
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0 flex-1 space-y-1">
-          <Label className="text-sm font-medium">Automatic Updates</Label>
-          <p className="text-muted-foreground text-xs">
-            {isAutomatic
-              ? "Prices sync automatically from market data providers."
-              : "Automatic syncing is off. You manage prices manually."}
-          </p>
-        </div>
-        <Popover open={open} onOpenChange={setOpen}>
-          <PopoverTrigger asChild>
-            <button type="button" className="shrink-0">
-              <Switch checked={isAutomatic} />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent className="w-[360px] p-4" align="end">
-            <div className="space-y-4">
-              <h4 className="font-medium">
-                {isAutomatic ? "Disable Automatic Updates?" : "Enable Automatic Updates?"}
-              </h4>
-              {isAutomatic ? (
-                <>
-                  <p className="text-muted-foreground text-sm">
-                    Turning this off will stop automatic price updates. You&apos;ll need to enter
-                    and maintain price data yourself.
-                  </p>
-                  <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
-                    Automatic price updates will be disabled.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="text-muted-foreground text-sm">
-                    Turning this on will enable price fetching from market data providers. Your
-                    manually entered quotes will be preserved but may be overwritten on sync.
-                  </p>
-                  <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
-                    Manual quotes may be replaced by provider data.
-                  </p>
-                </>
-              )}
-              <div className="flex justify-end space-x-2">
-                <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={() => {
-                    onConfirm();
-                    setOpen(false);
-                  }}
-                >
-                  Confirm
-                </Button>
-              </div>
-            </div>
-          </PopoverContent>
-        </Popover>
-      </div>
-    </div>
-  );
-}
 
 interface AssetEditSheetProps {
   asset: Asset | null;
@@ -311,13 +377,19 @@ export function AssetEditSheet({
       instrumentType: asset?.instrumentType ?? "",
       quoteCcy: asset?.quoteCcy ?? "",
       instrumentExchangeMic: normalizeMic(asset?.instrumentExchangeMic),
-      quoteMode: asset?.quoteMode === "MANUAL" ? QuoteMode.MANUAL : QuoteMode.MARKET,
+      quoteMode:
+        asset?.quoteMode === "MANUAL"
+          ? QuoteMode.MANUAL
+          : asset?.quoteMode === "INTERNAL_YTM"
+            ? QuoteMode.INTERNAL_YTM
+            : QuoteMode.MARKET,
       preferredProvider: parsePreferredProvider(
         asset?.providerConfig as Record<string, unknown> | null,
       ),
       providerConfig: parseProviderOverrides(
         asset?.providerConfig as Record<string, unknown> | null,
       ),
+      bond: parseBondSpec(asset?.metadata?.bond),
     },
   });
 
@@ -339,13 +411,19 @@ export function AssetEditSheet({
         instrumentType: asset.instrumentType ?? "",
         quoteCcy: asset.quoteCcy ?? "",
         instrumentExchangeMic: normalizeMic(asset.instrumentExchangeMic),
-        quoteMode: asset.quoteMode === "MANUAL" ? QuoteMode.MANUAL : QuoteMode.MARKET,
+        quoteMode:
+          asset.quoteMode === "MANUAL"
+            ? QuoteMode.MANUAL
+            : asset.quoteMode === "INTERNAL_YTM"
+              ? QuoteMode.INTERNAL_YTM
+              : QuoteMode.MARKET,
         preferredProvider: parsePreferredProvider(
           asset.providerConfig as Record<string, unknown> | null,
         ),
         providerConfig: parseProviderOverrides(
           asset.providerConfig as Record<string, unknown> | null,
         ),
+        bond: parseBondSpec(asset.metadata?.bond),
       });
     }
   }, [asset, form]);
@@ -356,6 +434,43 @@ export function AssetEditSheet({
       setActiveTab(defaultTab);
     }
   }, [open, defaultTab]);
+
+  // Auto-compute YTM (current yield at par) from coupon rate when the four
+  // bond inputs (face value, coupon rate, frequency, maturity) are all set
+  // and the user hasn't typed an explicit YTM value. At par, current yield
+  // = coupon rate, which is the only YTM derivable without a market price.
+  const watchedBondCouponRate = form.watch("bond.couponRate");
+  const watchedBondFaceValue = form.watch("bond.faceValue");
+  const watchedBondFrequency = form.watch("bond.couponFrequency");
+  const watchedBondMaturity = form.watch("bond.maturityDate");
+  const watchedBondYtmSource = form.watch("bond.ytmSource");
+  const watchedBondYtmFixed = form.watch("bond.ytmFixedValue");
+  useEffect(() => {
+    if (watchedBondYtmSource !== "FIXED") return;
+    if (
+      watchedBondCouponRate == null ||
+      watchedBondFaceValue == null ||
+      !watchedBondFrequency ||
+      !watchedBondMaturity
+    ) {
+      return;
+    }
+    if (watchedBondYtmFixed == null) {
+      form.setValue("bond.ytmFixedValue", watchedBondCouponRate, {
+        shouldDirty: false,
+        shouldTouch: false,
+        shouldValidate: false,
+      });
+    }
+  }, [
+    form,
+    watchedBondCouponRate,
+    watchedBondFaceValue,
+    watchedBondFrequency,
+    watchedBondMaturity,
+    watchedBondYtmSource,
+    watchedBondYtmFixed,
+  ]);
 
   const handleSave = useCallback(
     async (values: AssetFormValues) => {
@@ -369,6 +484,12 @@ export function AssetEditSheet({
       );
       const normalizedMic = normalizeMic(values.instrumentExchangeMic);
 
+      // Build metadata: merge existing metadata, update bond section if INTERNAL_YTM
+      const updatedMetadata: Record<string, unknown> = { ...(asset.metadata ?? {}) };
+      if (values.quoteMode === QuoteMode.INTERNAL_YTM && values.bond) {
+        updatedMetadata.bond = serializeBondSpec(values.bond);
+      }
+
       try {
         // Update profile with all fields including quote mode
         await updateAssetProfileMutation.mutateAsync({
@@ -381,6 +502,7 @@ export function AssetEditSheet({
           quoteCcy: values.quoteCcy,
           instrumentExchangeMic: normalizedMic || null,
           providerConfig: serializedOverrides,
+          metadata: updatedMetadata,
         });
 
         onOpenChange(false);
@@ -392,7 +514,16 @@ export function AssetEditSheet({
     [asset, updateAssetProfileMutation, onOpenChange],
   );
 
-  const isManualMode = form.watch("quoteMode") === QuoteMode.MANUAL;
+  const selectedQuoteMode = form.watch("quoteMode");
+  const isMarketMode = selectedQuoteMode === QuoteMode.MARKET;
+  const isInternalYtmMode = selectedQuoteMode === QuoteMode.INTERNAL_YTM;
+  const watchedYtmSource = form.watch("bond.ytmSource");
+
+  const quoteModeOptions: ResponsiveSelectOption[] = [
+    { value: QuoteMode.MARKET, label: "Market (auto-sync)" },
+    { value: QuoteMode.MANUAL, label: "Manual" },
+    { value: QuoteMode.INTERNAL_YTM, label: "Internal YTM (bond model)" },
+  ];
   const isSaving = updateAssetProfileMutation.isPending;
 
   // Check if current asset kind is system-managed (shouldn't allow editing)
@@ -721,18 +852,362 @@ export function AssetEditSheet({
                     </div>
 
                     {/* Pricing Mode Toggle Card */}
-                    <PricingModeToggle
-                      isManualMode={isManualMode}
-                      onConfirm={() => {
-                        form.setValue(
-                          "quoteMode",
-                          isManualMode ? QuoteMode.MARKET : QuoteMode.MANUAL,
-                        );
-                      }}
+                    <FormField
+                      control={form.control}
+                      name="quoteMode"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Pricing Mode</FormLabel>
+                          <FormControl>
+                            <ResponsiveSelect
+                              value={field.value}
+                              onValueChange={field.onChange}
+                              options={quoteModeOptions}
+                              placeholder="Select pricing mode"
+                              sheetTitle="Pricing Mode"
+                              sheetDescription="Choose how this asset gets its price."
+                              triggerClassName="h-11"
+                            />
+                          </FormControl>
+                        </FormItem>
+                      )}
                     />
 
+                    {/* Bond YTM Parameters - Only shown for INTERNAL_YTM mode */}
+                    {isInternalYtmMode && (
+                      <div className="space-y-4 rounded-lg border p-4">
+                        <p className="text-sm font-medium">Bond Parameters</p>
+
+                        {/* Basic bond info */}
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <FormField
+                            control={form.control}
+                            name="bond.maturityDate"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Maturity Date</FormLabel>
+                                <FormControl>
+                                  <Input type="date" {...field} value={field.value ?? ""} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <FormField
+                            control={form.control}
+                            name="bond.faceValue"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Face Value</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    placeholder="1000"
+                                    {...field}
+                                    value={field.value ?? ""}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <FormField
+                            control={form.control}
+                            name="bond.couponRate"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Coupon Rate (%)</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    step="0.001"
+                                    placeholder="4.375"
+                                    {...field}
+                                    value={field.value ?? ""}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <FormField
+                            control={form.control}
+                            name="bond.couponFrequency"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Coupon Frequency</FormLabel>
+                                <Select
+                                  onValueChange={field.onChange}
+                                  value={field.value ?? ""}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger className="h-9">
+                                      <SelectValue placeholder="Select frequency" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    <SelectItem value="ANNUAL">Annual</SelectItem>
+                                    <SelectItem value="SEMI_ANNUAL">Semi-Annual</SelectItem>
+                                    <SelectItem value="QUARTERLY">Quarterly</SelectItem>
+                                    <SelectItem value="MONTHLY">Monthly</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <FormField
+                            control={form.control}
+                            name="bond.isin"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>ISIN</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    placeholder="e.g. FR0014008IJ3"
+                                    {...field}
+                                    value={field.value ?? ""}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+
+                        <p className="text-muted-foreground text-xs font-medium uppercase tracking-wide pt-2">
+                          YTM Settings
+                        </p>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <FormField
+                            control={form.control}
+                            name="bond.ytmSource"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>YTM Source</FormLabel>
+                                <Select
+                                  onValueChange={field.onChange}
+                                  value={field.value ?? ""}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger className="h-9">
+                                      <SelectValue placeholder="Select source" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    <SelectItem value="FIXED">Fixed YTM</SelectItem>
+                                    <SelectItem value="CURVE_PLUS_SPREAD">
+                                      Curve + Z-Spread
+                                    </SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          {watchedYtmSource === "FIXED" && (
+                            <FormField
+                              control={form.control}
+                              name="bond.ytmFixedValue"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>YTM (%)</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type="number"
+                                      step="0.001"
+                                      placeholder="3.25"
+                                      {...field}
+                                      value={field.value ?? ""}
+                                    />
+                                  </FormControl>
+                                  <p className="text-muted-foreground text-xs">
+                                    Auto-rempli avec le taux de coupon (rendement courant
+                                    au pair) lorsque face value, coupon, fréquence et
+                                    maturité sont renseignés. Modifiez si vous disposez
+                                    d'un YTM de marché.
+                                  </p>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                          )}
+
+                          {watchedYtmSource === "CURVE_PLUS_SPREAD" && (
+                            <FormField
+                              control={form.control}
+                              name="bond.ytmSpreadBps"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Z-Spread (bps)</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type="number"
+                                      step="1"
+                                      placeholder="120"
+                                      {...field}
+                                      value={field.value ?? ""}
+                                    />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                          )}
+
+                          <FormField
+                            control={form.control}
+                            name="bond.dayCountConvention"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Day Count</FormLabel>
+                                <Select
+                                  onValueChange={field.onChange}
+                                  value={field.value ?? ""}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger className="h-9">
+                                      <SelectValue placeholder="Select convention" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    <SelectItem value="ACT/ACT">ACT/ACT</SelectItem>
+                                    <SelectItem value="30/360">30/360</SelectItem>
+                                    <SelectItem value="ACT/365">ACT/365</SelectItem>
+                                    <SelectItem value="ACT/360">ACT/360</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name="bond.pricingMethod"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Price Type</FormLabel>
+                                <Select
+                                  onValueChange={field.onChange}
+                                  value={field.value ?? ""}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger className="h-9">
+                                      <SelectValue placeholder="Select type" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    <SelectItem value="CLEAN">Clean price</SelectItem>
+                                    <SelectItem value="DIRTY">Dirty price (+ accrued)</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name="bond.settlementDays"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Settlement Days (T+N)</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    step="1"
+                                    min="0"
+                                    placeholder="1"
+                                    {...field}
+                                    value={field.value ?? ""}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+
+                        <FormField
+                          control={form.control}
+                          name="bond.firstCouponDate"
+                          render={({ field }) => {
+                            // Watch the dependency fields so the preview updates live
+                            const bondValues = form.watch("bond");
+                            const previewDates = generateCouponSchedule(
+                              field.value ?? null,
+                              bondValues?.couponFrequency ?? null,
+                              bondValues?.maturityDate ?? null,
+                            );
+                            const manualSchedule = bondValues?.couponSchedule?.trim() ?? "";
+                            return (
+                              <FormItem>
+                                <FormLabel>First Coupon Date</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="date"
+                                    {...field}
+                                    value={field.value ?? ""}
+                                  />
+                                </FormControl>
+                                <p className="text-muted-foreground text-xs">
+                                  The schedule is auto-generated from this date, the coupon
+                                  frequency and the maturity date. You can override the full
+                                  schedule below if your bond has irregular coupons.
+                                </p>
+                                {previewDates.length > 0 && manualSchedule.length === 0 && (
+                                  <div className="bg-muted/40 rounded-md border px-3 py-2">
+                                    <p className="text-muted-foreground text-xs font-medium">
+                                      Generated schedule ({previewDates.length} payment
+                                      {previewDates.length === 1 ? "" : "s"})
+                                    </p>
+                                    <p className="mt-1 break-words font-mono text-xs">
+                                      {previewDates.join(", ")}
+                                    </p>
+                                  </div>
+                                )}
+                                <FormMessage />
+                              </FormItem>
+                            );
+                          }}
+                        />
+
+                        <FormField
+                          control={form.control}
+                          name="bond.couponSchedule"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>
+                                Custom Coupon Schedule{" "}
+                                <span className="text-muted-foreground text-xs">
+                                  (optional)
+                                </span>
+                              </FormLabel>
+                              <FormControl>
+                                <Textarea
+                                  rows={2}
+                                  placeholder="Leave empty to use the auto-generated schedule above"
+                                  {...field}
+                                  value={field.value ?? ""}
+                                />
+                              </FormControl>
+                              <p className="text-muted-foreground text-xs">
+                                Comma-separated ISO dates (YYYY-MM-DD). Use only if your
+                                bond has an irregular schedule that the auto-generator can't
+                                produce.
+                              </p>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+                    )}
+
                     {/* Preferred Provider - Only show for automatic pricing */}
-                    {!isManualMode && (
+                    {isMarketMode && (
                       <FormField
                         control={form.control}
                         name="preferredProvider"
@@ -761,7 +1236,7 @@ export function AssetEditSheet({
                     )}
 
                     {/* Symbol Mapping - Only show for automatic pricing */}
-                    {!isManualMode && (
+                    {isMarketMode && (
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <div>

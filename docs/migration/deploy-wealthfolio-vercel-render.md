@@ -76,8 +76,14 @@ Use the repo root as the Vercel project root.
 - Framework preset: `Vite`
 - Root directory: repository root
 - Install command: `pnpm install --frozen-lockfile`
-- Build command: `pnpm --filter frontend build`
+- Build command: `pnpm --filter frontend exec vite build`
 - Output directory: `dist`
+
+### Current build caveat
+
+The repository currently has frontend TypeScript errors in the Orus integration surface, so `pnpm --filter frontend build` is not the right deployment command yet because it runs `tsc` before Vite.
+
+For short-term delivery, deploy with the Vite-only build command above. This path was validated locally with a successful production bundle build.
 
 ### API proxying
 

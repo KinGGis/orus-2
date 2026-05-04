@@ -355,6 +355,7 @@ impl From<DataSource> for QuoteSource {
             DataSource::Finnhub => QuoteSource::Provider(ProviderId::finnhub()),
             DataSource::UsTreasuryCalc => QuoteSource::Provider(ProviderId::us_treasury_calc()),
             DataSource::BoerseFrankfurt => QuoteSource::Provider(ProviderId::boerse_frankfurt()),
+            DataSource::InternalBondModel => QuoteSource::Manual, // Internally calculated — treat as manual for source tracking
         }
     }
 }

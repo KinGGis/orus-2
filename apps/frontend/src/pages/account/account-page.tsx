@@ -18,7 +18,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@wealthfolio/ui";
-import { useMemo, useState } from "react";
+import { type ChangeEvent, useMemo, useRef, useState } from "react";
 
 import { ActionPalette, type ActionPaletteGroup } from "@/components/action-palette";
 import { PrivacyToggle } from "@/components/privacy-toggle";
@@ -44,7 +44,7 @@ import { BulkHoldingsModal } from "@/pages/activity/components/forms/bulk-holdin
 import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigger";
 import { HoldingsEditMode } from "@/pages/holdings/components/holdings-edit-mode";
 import { useCalculatePerformanceHistory } from "@/pages/performance/hooks/use-performance-data";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, type Icon } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import {
@@ -65,6 +65,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@wealthfolio/ui/components/ui/sheet";
+import { useToast } from "@wealthfolio/ui/components/ui/use-toast";
 import { format, parseISO, subMonths } from "date-fns";
 import { useNavigate, useParams } from "react-router-dom";
 import { AccountContributionLimit } from "./account-contribution-limit";
@@ -102,8 +103,11 @@ const formatDate = (dateStr: string): string => {
 
 // Define the initial interval code (consistent with other pages)
 const INITIAL_INTERVAL_CODE: TimePeriod = "3M";
+const SNAPTRADE_THOT_IMPORT_DRAFT_KEY = "snaptrade_thot_import_draft_v1";
 
 const AccountPage = () => {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const { settings } = useSettingsContext();
   const baseCurrency = settings?.baseCurrency ?? "USD";
   const { id = "" } = useParams<{ id: string }>();
@@ -120,10 +124,17 @@ const AccountPage = () => {
   const [selectedActivityDate, setSelectedActivityDate] = useState<string | null>(null);
   const [isActivitySheetOpen, setIsActivitySheetOpen] = useState(false);
   const [showBulkHoldingsForm, setShowBulkHoldingsForm] = useState(false);
+  const [isSnaptradeRefreshing, setIsSnaptradeRefreshing] = useState(false);
+  const [isPreparingThotImport, setIsPreparingThotImport] = useState(false);
+  const thotFileInputRef = useRef<HTMLInputElement>(null);
 
   const recalculatePortfolioMutation = useRecalculatePortfolioMutation();
   const { accounts, isLoading: isAccountsLoading } = useAccounts();
   const account = useMemo(() => accounts?.find((acc) => acc.id === id), [accounts, id]);
+
+  const isSnaptradeAccount = useMemo(() => {
+    return account?.provider?.toUpperCase() === "SNAPTRADE";
+  }, [account]);
 
   // Check if this account is in HOLDINGS tracking mode
   const isHoldingsMode = useMemo(() => {
@@ -299,6 +310,98 @@ const AccountPage = () => {
     setMobileSelectorOpen(false);
   };
 
+  const handleSnaptradeRefresh = async () => {
+    setIsSnaptradeRefreshing(true);
+    try {
+      const response = await fetch("/api/v1/dfc/snaptrade/sync", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || "SnapTrade sync failed");
+      }
+
+      const result = await response.json();
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.ACCOUNTS] }),
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.HOLDINGS, id] }),
+        queryClient.invalidateQueries({ queryKey: QueryKeys.valuationHistory(id) }),
+        queryClient.invalidateQueries({ queryKey: QueryKeys.snapshots(id) }),
+        queryClient.invalidateQueries({ queryKey: ["activities", "markerDates", id] }),
+        queryClient.invalidateQueries({ queryKey: ["activities", "byDate", id] }),
+      ]);
+
+      toast({
+        title: "SnapTrade rafraichi",
+        description: `✓ ${result.accountsSynced ?? 0} comptes, ${result.activitiesSynced ?? 0} activites synchronises`,
+      });
+    } catch (error) {
+      toast({
+        title: "Erreur SnapTrade",
+        description:
+          error instanceof Error ? error.message : "Impossible de rafraichir le portefeuille",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSnaptradeRefreshing(false);
+    }
+  };
+
+  const handleThotUploadClick = () => {
+    thotFileInputRef.current?.click();
+  };
+
+  const handleThotFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      toast({
+        title: "Format invalide",
+        description: "Le statement IBKR doit être un fichier CSV.",
+        variant: "destructive",
+      });
+      event.target.value = "";
+      return;
+    }
+
+    setIsPreparingThotImport(true);
+    try {
+      const content = await file.text();
+      window.sessionStorage.setItem(
+        SNAPTRADE_THOT_IMPORT_DRAFT_KEY,
+        JSON.stringify({
+          accountId: id,
+          fileName: file.name,
+          fileType: file.type || "text/csv",
+          lastModified: file.lastModified,
+          content,
+          source: "thot-snaptrade",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+      toast({
+        title: "Import IBKR préparé",
+        description: "Thot a préparé le fichier. Vous pouvez maintenant vérifier et importer les activités.",
+      });
+
+      navigate(`/import?account=${id}&source=thot-snaptrade`);
+    } catch {
+      toast({
+        title: "Erreur",
+        description: "Impossible de lire le fichier CSV.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsPreparingThotImport(false);
+      event.target.value = "";
+    }
+  };
+
   return (
     <Page>
       <PageHeader
@@ -331,6 +434,15 @@ const AccountPage = () => {
                     {
                       title: "Manage",
                       items: [
+                        ...(isSnaptradeAccount
+                          ? [
+                              {
+                                icon: Icons.Refresh,
+                                label: "Refresh SnapTrade",
+                                onClick: handleSnaptradeRefresh,
+                              },
+                            ]
+                          : []),
                         {
                           icon: Icons.Clock,
                           label: "Recalculate History",
@@ -367,6 +479,15 @@ const AccountPage = () => {
                     {
                       title: "Manage",
                       items: [
+                        ...(isSnaptradeAccount
+                          ? [
+                              {
+                                icon: Icons.Refresh,
+                                label: "Refresh SnapTrade",
+                                onClick: handleSnaptradeRefresh,
+                              },
+                            ]
+                          : []),
                         {
                           icon: Icons.Clock,
                           label: "Recalculate History",
@@ -519,6 +640,42 @@ const AccountPage = () => {
         </div>
       </PageHeader>
       <PageContent>
+        {isSnaptradeAccount && (
+          <Card className="mb-4 border-dashed">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Icons.Sparkles className="size-4" />
+                Invite Thot: mise a jour des transactions SnapTrade
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-muted-foreground text-sm">
+                Uploadez votre Activity Statement IBKR (CSV) pour mettre a jour l'historique des activites de ce portefeuille SnapTrade.
+              </p>
+              <Button
+                variant="secondary"
+                className="rounded-full"
+                onClick={handleThotUploadClick}
+                disabled={isPreparingThotImport}
+              >
+                {isPreparingThotImport ? (
+                  <Icons.Spinner className="mr-2 size-4 animate-spin" />
+                ) : (
+                  <Icons.Upload className="mr-2 size-4" />
+                )}
+                {isPreparingThotImport ? "Preparation..." : "Uploader statement IBKR"}
+              </Button>
+              <input
+                ref={thotFileInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={handleThotFileSelected}
+              />
+            </CardContent>
+          </Card>
+        )}
+
         {hasHoldings && !isHoldingsLoading ? (
           <>
             <div className="grid grid-cols-1 gap-4 pt-0 md:grid-cols-3">
@@ -554,6 +711,24 @@ const AccountPage = () => {
                     </PortfolioUpdateTrigger>
                   </CardTitle>
                   <div className="-mt-3 flex items-center gap-1 self-start">
+                    {isSnaptradeAccount && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="h-8 rounded-full"
+                        onClick={handleSnaptradeRefresh}
+                        disabled={isSnaptradeRefreshing}
+                      >
+                        {isSnaptradeRefreshing ? (
+                          <Icons.Spinner className="mr-1 size-4 animate-spin" />
+                        ) : (
+                          <Icons.Refresh className="mr-1 size-4" />
+                        )}
+                        <span className="hidden sm:inline">
+                          {isSnaptradeRefreshing ? "Refreshing..." : "Refresh SnapTrade"}
+                        </span>
+                      </Button>
+                    )}
                     <PrivacyToggle />
                     <TooltipProvider>
                       <Tooltip>

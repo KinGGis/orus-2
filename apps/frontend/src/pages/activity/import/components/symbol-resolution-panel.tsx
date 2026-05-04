@@ -12,11 +12,13 @@ export interface UnresolvedSymbol {
 interface SymbolResolutionPanelProps {
   unresolvedSymbols: UnresolvedSymbol[];
   onApplyMappings: (mappings: Record<string, SymbolSearchResult>) => void;
+  preferredResults?: SymbolSearchResult[];
 }
 
 export function SymbolResolutionPanel({
   unresolvedSymbols,
   onApplyMappings,
+  preferredResults,
 }: SymbolResolutionPanelProps) {
   const [mappings, setMappings] = useState<Record<string, SymbolSearchResult>>({});
 
@@ -54,6 +56,7 @@ export function SymbolResolutionPanel({
               <TickerSearchInput
                 defaultValue={csvSymbol}
                 placeholder={`Search for ${csvSymbol}...`}
+                preferredResults={preferredResults}
                 onSelectResult={(_symbol, result) => {
                   if (result) {
                     setMappings((prev) => ({ ...prev, [csvSymbol]: result }));

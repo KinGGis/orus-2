@@ -16,10 +16,34 @@ export const useAssetProfileMutations = () => {
     });
   };
 
-  const handleError = (action: string) => {
+  const extractMessage = (error: unknown): string | null => {
+    if (!error) return null;
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    if (typeof error === "object" && "message" in error) {
+      const m = (error as { message?: unknown }).message;
+      return typeof m === "string" ? m : null;
+    }
+    return null;
+  };
+
+  const friendlyServerMessage = (raw: string | null): string | null => {
+    if (!raw) return null;
+    if (raw.includes("UNIQUE constraint failed: assets.instrument_key")) {
+      return (
+        "Another asset already exists with the same Instrument Type + Symbol " +
+        "(+ Exchange MIC). Change one of those fields, or delete the duplicate " +
+        "asset before retrying."
+      );
+    }
+    return raw;
+  };
+
+  const handleError = (action: string, error: unknown) => {
+    const friendly = friendlyServerMessage(extractMessage(error));
     toast({
       title: "Uh oh! Something went wrong.",
-      description: `There was a problem ${action}.`,
+      description: friendly ?? `There was a problem ${action}.`,
       variant: "destructive",
     });
   };
@@ -31,7 +55,7 @@ export const useAssetProfileMutations = () => {
     },
     onError: (error) => {
       logger.error(`Error updating asset profile: ${error}`);
-      handleError("updating the asset profile");
+      handleError("updating the asset profile", error);
     },
   });
 
@@ -43,7 +67,7 @@ export const useAssetProfileMutations = () => {
     },
     onError: (error) => {
       logger.error(`Error updating asset quote mode: ${error}`);
-      handleError("updating the asset quote mode");
+      handleError("updating the asset quote mode", error);
     },
   });
 

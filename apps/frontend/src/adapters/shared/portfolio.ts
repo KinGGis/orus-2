@@ -175,6 +175,8 @@ export interface HoldingInput {
   dataSource?: string;
   /** Asset kind (e.g., "INVESTMENT", "OTHER") */
   assetKind?: string;
+  /** Instrument type override (e.g., "BOND", "EQUITY", "CRYPTO", "OPTION", "OTHER") */
+  instrumentType?: string;
 }
 
 /**

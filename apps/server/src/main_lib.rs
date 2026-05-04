@@ -55,10 +55,14 @@ use wealthfolio_storage_sqlite::{
     limits::ContributionLimitRepository,
     market_data::{MarketDataRepository, QuoteSyncStateRepository},
     portfolio::{snapshot::SnapshotRepository, valuation::ValuationRepository},
+    revolut::RevolutRepository,
     settings::SettingsRepository,
     sync::{AppSyncRepository, BrokerSyncStateRepository, ImportRunRepository, PlatformRepository},
     taxonomies::TaxonomyRepository,
+    users::UserRepository,
 };
+use wealthfolio_core::revolut::RevolutOAuthConfig;
+use wealthfolio_core::snaptrade::SnapTradeConfig;
 
 pub struct AppState {
     /// Domain event sink for emitting events after mutations.
@@ -76,6 +80,7 @@ pub struct AppState {
     pub timezone: Arc<RwLock<String>>,
     pub snapshot_service: Arc<dyn SnapshotServiceTrait + Send + Sync>,
     pub snapshot_repository: Arc<SnapshotRepository>,
+    pub valuation_repository: Arc<ValuationRepository>,
     pub performance_service:
         Arc<dyn wealthfolio_core::portfolio::performance::PerformanceServiceTrait + Send + Sync>,
     pub income_service: Arc<dyn IncomeServiceTrait + Send + Sync>,
@@ -102,6 +107,13 @@ pub struct AppState {
     pub device_sync_runtime: Arc<DeviceSyncRuntimeState>,
     pub health_service: Arc<dyn HealthServiceTrait + Send + Sync>,
     pub token_lifecycle: Arc<TokenLifecycleState>,
+    // DFC-specific repositories
+    pub user_repository: Arc<UserRepository>,
+    pub revolut_repository: Arc<RevolutRepository>,
+    // DFC Revolut OAuth config (optional - only if env vars set)
+    pub revolut_oauth_config: Option<Arc<RevolutOAuthConfig>>,
+    // DFC SnapTrade config (optional - only if env vars set)
+    pub snaptrade_config: Option<Arc<SnapTradeConfig>>,
 }
 
 pub fn init_tracing() {
@@ -405,6 +417,23 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let device_sync_runtime = Arc::new(DeviceSyncRuntimeState::new());
     let token_lifecycle = Arc::new(TokenLifecycleState::new());
 
+    // DFC-specific repositories for RBAC and Revolut integration
+    let user_repository = Arc::new(UserRepository::new(pool.clone()));
+    let revolut_repository = Arc::new(RevolutRepository::new(pool.clone()));
+
+    // DFC Revolut OAuth config (optional - read from env vars)
+    let revolut_oauth_config = RevolutOAuthConfig::from_env().map(Arc::new);
+    if revolut_oauth_config.is_some() {
+        tracing::info!("Revolut OAuth configured (sandbox={})", 
+            revolut_oauth_config.as_ref().unwrap().sandbox);
+    }
+
+    // DFC SnapTrade config (optional - read from env vars)
+    let snaptrade_config = SnapTradeConfig::from_env().map(Arc::new);
+    if snaptrade_config.is_some() {
+        tracing::info!("SnapTrade API configured");
+    }
+
     // Domain event sink - Phase 2: Start the worker now that all services are ready
     domain_event_sink.start_worker(
         asset_service.clone(),
@@ -444,6 +473,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         timezone,
         snapshot_service,
         snapshot_repository,
+        valuation_repository,
         performance_service,
         income_service,
         goal_service,
@@ -469,5 +499,9 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         device_sync_runtime,
         health_service,
         token_lifecycle,
+        user_repository,
+        revolut_repository,
+        revolut_oauth_config,
+        snaptrade_config,
     }))
 }

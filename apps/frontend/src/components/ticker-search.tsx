@@ -49,12 +49,15 @@ interface SearchProps {
   onClear?: () => void;
   /** Hide the "Create custom (manual)" option in search results */
   hideCustomCreate?: boolean;
+  /** Preferred symbols shown first (e.g. symbols already held in the selected portfolio). */
+  preferredResults?: SymbolSearchResult[];
   /** Test ID for e2e testing */
   "data-testid"?: string;
 }
 
 interface SearchResultsProps {
   results?: SymbolSearchResult[];
+  preferredResults?: SymbolSearchResult[];
   query: string;
   isLoading: boolean;
   isError?: boolean;
@@ -79,6 +82,7 @@ function getSearchResultKey(result: SymbolSearchResult) {
 const SearchResults = memo(
   ({
     results,
+    preferredResults,
     query,
     isLoading,
     selectedResult,
@@ -86,8 +90,25 @@ const SearchResults = memo(
     onCreateCustomAsset,
     hideCustomCreate,
   }: SearchResultsProps) => {
-    const hasResults = results && results.length > 0;
-    const showNoResults = !isLoading && !hasResults && query.length > 1;
+    const normalizedQuery = query.trim().toUpperCase();
+
+    const filteredPreferred = (preferredResults ?? []).filter((ticker) => {
+      if (!normalizedQuery) return true;
+      const haystack = [ticker.symbol, ticker.longName, ticker.shortName]
+        .filter(Boolean)
+        .join(" ")
+        .toUpperCase();
+      return haystack.includes(normalizedQuery);
+    });
+
+    const preferredKeys = new Set(filteredPreferred.map((ticker) => getSearchResultKey(ticker)));
+    const filteredResults = (results ?? []).filter(
+      (ticker) => !preferredKeys.has(getSearchResultKey(ticker)),
+    );
+
+    const hasPreferredResults = filteredPreferred.length > 0;
+    const hasResults = filteredResults.length > 0;
+    const showNoResults = !isLoading && !hasPreferredResults && !hasResults && query.length > 1;
     const selectedKey = selectedResult ? getSearchResultKey(selectedResult) : null;
 
     return (
@@ -109,9 +130,47 @@ const SearchResults = memo(
           </div>
         )}
 
+        {/* Preferred results (symbols already in portfolio) */}
+        {hasPreferredResults && (
+          <div className="text-muted-foreground px-2 py-1.5 text-[10px] uppercase tracking-wide">
+            Portfolio symbols
+          </div>
+        )}
+        {hasPreferredResults &&
+          filteredPreferred.map((ticker) => {
+            const exchangeDisplay = "Portfolio";
+            const displayName = ticker.longName || ticker.shortName || ticker.symbol;
+            const itemKey = getSearchResultKey(ticker);
+            const isSelected = selectedKey === itemKey;
+            return (
+              <CommandItem
+                key={itemKey}
+                onSelect={() => onSelect(ticker)}
+                value={itemKey}
+                className="flex items-center justify-between rounded-none py-2"
+              >
+                <div className="flex flex-col">
+                  <span className="font-mono text-xs font-semibold uppercase">{ticker.symbol}</span>
+                  <span className="text-muted-foreground line-clamp-1 text-xs">{displayName}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex flex-col items-end">
+                    <span className="text-muted-foreground text-xs">{exchangeDisplay}</span>
+                    {ticker.currency && (
+                      <span className="text-muted-foreground text-[10px]">{ticker.currency}</span>
+                    )}
+                  </div>
+                  {isSelected && <Icons.Check className="size-4" />}
+                </div>
+              </CommandItem>
+            );
+          })}
+
+        {hasPreferredResults && hasResults && <CommandSeparator />}
+
         {/* Search results */}
         {hasResults &&
-          results.map((ticker) => {
+          filteredResults.map((ticker) => {
             // Use exchangeName if available (from backend), otherwise map exchange code to friendly name
             const exchangeDisplay = ticker.exchangeName || getExchangeDisplayName(ticker.exchange);
             const displayName = ticker.longName || ticker.shortName || ticker.symbol;
@@ -215,6 +274,7 @@ const TickerSearchInput = forwardRef<HTMLButtonElement, SearchProps>(
       quoteInfo,
       onClear,
       hideCustomCreate,
+      preferredResults,
       "data-testid": testId,
     },
     ref,
@@ -542,6 +602,7 @@ const TickerSearchInput = forwardRef<HTMLButtonElement, SearchProps>(
                 isError={isError}
                 query={searchQuery}
                 results={sortedTickers}
+                preferredResults={preferredResults}
                 selectedResult={selectedResult}
                 onSelect={handleSelectResult}
                 onCreateCustomAsset={handleCreateCustomAsset}

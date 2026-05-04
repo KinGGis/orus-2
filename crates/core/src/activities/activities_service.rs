@@ -403,11 +403,123 @@ impl ActivityService {
                             .map(str::trim)
                             .is_none_or(str::is_empty)
                     {
-                        Self::add_activity_error(
-                            &mut activity,
-                            "exchangeMic",
-                            "Exchange MIC is missing. Re-run import check before applying.",
+                        // Try to recover MIC from symbol suffix (e.g. SAP.FRK) or an existing asset.
+                        let (base_symbol, suffix_mic) = parse_symbol_with_exchange_suffix(&activity.symbol);
+                        if let Some(sfx) = suffix_mic {
+                            activity.exchange_mic = Some(sfx.to_string());
+                        }
+
+                        let existing_id = self.find_existing_asset_id(
+                            base_symbol,
+                            activity.exchange_mic.as_deref(),
+                            instrument_type.as_ref(),
+                            activity.quote_ccy.as_deref(),
                         );
+
+                        if let Some(existing_id) = existing_id {
+                            if let Ok(asset) = self.asset_service.get_asset_by_id(&existing_id) {
+                                if activity
+                                    .exchange_mic
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .is_none_or(str::is_empty)
+                                {
+                                    activity.exchange_mic = asset.instrument_exchange_mic;
+                                }
+                                if activity.quote_mode.is_none() {
+                                    activity.quote_mode =
+                                        Some(asset.quote_mode.as_db_str().to_string());
+                                }
+                            }
+                        } else if activity
+                            .exchange_mic
+                            .as_deref()
+                            .map(str::trim)
+                            .is_none_or(str::is_empty)
+                        {
+                            // Fallback: match known assets by symbol candidates even when the incoming
+                            // symbol is abbreviated (e.g. "MC" vs stored "MC.PA").
+                            let assets = self.asset_service.get_assets().unwrap_or_default();
+                            let expected_type = instrument_type.as_ref();
+
+                            for candidate in symbol_resolution_candidates(base_symbol) {
+                                let candidate_upper = candidate.to_uppercase();
+                                let matched_asset = assets.iter().find(|asset| {
+                                    let type_matches = expected_type.is_none_or(|expected| {
+                                        // Legacy assets may have no instrument_type persisted.
+                                        asset.instrument_type
+                                            .as_ref()
+                                            .is_none_or(|stored| stored == expected)
+                                    });
+
+                                    let symbol_matches = asset
+                                        .instrument_symbol
+                                        .as_ref()
+                                        .map(|s| s.to_uppercase() == candidate_upper)
+                                        .unwrap_or(false)
+                                        || asset
+                                            .display_code
+                                            .as_ref()
+                                            .map(|s| s.to_uppercase() == candidate_upper)
+                                            .unwrap_or(false);
+
+                                    type_matches && symbol_matches
+                                });
+
+                                if let Some(asset) = matched_asset {
+                                    if let Some(mic) = asset.instrument_exchange_mic.clone() {
+                                        activity.exchange_mic = Some(mic);
+                                    }
+                                    if activity.quote_mode.is_none() {
+                                        activity.quote_mode =
+                                            Some(asset.quote_mode.as_db_str().to_string());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        let still_missing_mic = activity
+                            .exchange_mic
+                            .as_deref()
+                            .map(str::trim)
+                            .is_none_or(str::is_empty);
+
+                        let has_existing_symbol_asset = if still_missing_mic {
+                            let assets = self.asset_service.get_assets().unwrap_or_default();
+                            symbol_resolution_candidates(base_symbol).iter().any(|candidate| {
+                                let candidate_upper = candidate.to_uppercase();
+                                assets.iter().any(|asset| {
+                                    asset
+                                        .instrument_symbol
+                                        .as_ref()
+                                        .map(|s| s.to_uppercase() == candidate_upper)
+                                        .unwrap_or(false)
+                                        || asset
+                                            .display_code
+                                            .as_ref()
+                                            .map(|s| s.to_uppercase() == candidate_upper)
+                                            .unwrap_or(false)
+                                })
+                            })
+                        } else {
+                            false
+                        };
+
+                        if still_missing_mic && !has_existing_symbol_asset {
+                            warn!(
+                                "Import apply missing MIC after fallback: line={:?}, symbol='{}', quote_ccy={:?}, instrument_type={:?}",
+                                activity.line_number,
+                                activity.symbol,
+                                activity.quote_ccy,
+                                instrument_type
+                            );
+                            Self::add_activity_warning(
+                                &mut activity,
+                                "exchangeMic",
+                                "Exchange MIC is missing. Proceeding without MIC; verify symbol/exchange mapping.",
+                            );
+                        }
                     }
                 }
             }
@@ -2153,7 +2265,7 @@ impl ActivityServiceTrait for ActivityService {
                 effective_instrument_type.as_ref(),
                 Some(InstrumentType::Crypto | InstrumentType::Fx)
             );
-            let resolved_mic = if is_non_security { None } else { resolved_mic };
+            let mut resolved_mic = if is_non_security { None } else { resolved_mic };
             let normalized_symbol = if is_crypto {
                 parse_crypto_pair_symbol(base_symbol)
                     .map(|(base, _)| base)
@@ -2169,10 +2281,49 @@ impl ActivityServiceTrait for ActivityService {
                 .map(|m| m.to_uppercase() == "MANUAL")
                 .unwrap_or(false);
 
+            let quote_ccy_input = if matches!(
+                effective_instrument_type,
+                Some(InstrumentType::Crypto | InstrumentType::Fx)
+            ) {
+                parse_crypto_pair_symbol(base_symbol)
+                    .map(|(_, quote)| quote)
+                    .or_else(|| Self::normalize_quote_ccy(activity.quote_ccy.as_deref()))
+                    .or_else(|| {
+                        let c = activity.currency.trim();
+                        if c.is_empty() {
+                            None
+                        } else {
+                            Some(c.to_string())
+                        }
+                    })
+            } else {
+                None
+            };
+
+            // If the asset already exists in portfolio, we can accept missing MIC for equity
+            // and bind the activity to that known symbol identity during import.
+            let existing_id = self.find_existing_asset_id(
+                &normalized_symbol,
+                resolved_mic.as_deref(),
+                effective_instrument_type.as_ref(),
+                quote_ccy_input.as_deref(),
+            );
+
+            let existing_asset = existing_id
+                .as_ref()
+                .and_then(|id| self.asset_service.get_asset_by_id(id).ok());
+
+            // Reuse known portfolio asset identity when market-data lookup did not return a MIC.
+            if resolved_mic.is_none() {
+                if let Some(asset) = existing_asset.as_ref() {
+                    resolved_mic = asset.instrument_exchange_mic.clone();
+                }
+            }
+
             // Equities (Investment + Equity instrument) must have a resolved exchange MIC
             let is_equity = effective_kind == AssetKind::Investment
                 && effective_instrument_type.as_ref() == Some(&InstrumentType::Equity);
-            if is_equity && resolved_mic.is_none() && !is_manual_quote {
+            if is_equity && resolved_mic.is_none() && !is_manual_quote && existing_id.is_none() {
                 activity.is_valid = false;
                 let mut errors = std::collections::HashMap::new();
                 errors.insert(
@@ -2198,37 +2349,14 @@ impl ActivityServiceTrait for ActivityService {
 
             // Read-only: check if asset exists for name/currency enrichment
             let mut asset_currency: Option<String> = None;
-            let quote_ccy_input = if matches!(
-                effective_instrument_type,
-                Some(InstrumentType::Crypto | InstrumentType::Fx)
-            ) {
-                parse_crypto_pair_symbol(base_symbol)
-                    .map(|(_, quote)| quote)
-                    .or_else(|| Self::normalize_quote_ccy(activity.quote_ccy.as_deref()))
-                    .or_else(|| {
-                        let c = activity.currency.trim();
-                        if c.is_empty() {
-                            None
-                        } else {
-                            Some(c.to_string())
-                        }
-                    })
-            } else {
-                None
-            };
-            let existing_id = self.find_existing_asset_id(
-                &normalized_symbol,
-                resolved_mic.as_deref(),
-                effective_instrument_type.as_ref(),
-                quote_ccy_input.as_deref(),
-            );
-            if let Some(ref id) = existing_id {
-                if let Ok(asset) = self.asset_service.get_asset_by_id(id) {
-                    activity.symbol_name = asset.name;
-                    asset_currency = Some(asset.quote_ccy.clone());
-                } else {
-                    activity.symbol_name = Some(normalized_symbol.clone());
+            if let Some(asset) = existing_asset {
+                activity.symbol_name = asset.name;
+                asset_currency = Some(asset.quote_ccy.clone());
+                if activity.quote_mode.is_none() {
+                    activity.quote_mode = Some(asset.quote_mode.as_db_str().to_string());
                 }
+            } else if existing_id.is_some() {
+                activity.symbol_name = Some(normalized_symbol.clone());
             } else {
                 activity.symbol_name = Some(normalized_symbol.clone());
             }

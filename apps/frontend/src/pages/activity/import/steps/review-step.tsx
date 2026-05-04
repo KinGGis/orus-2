@@ -1,12 +1,20 @@
-import { checkActivitiesImport, logger, saveAccountImportMapping } from "@/adapters";
+import {
+  checkActivitiesImport,
+  getAssets,
+  getHoldings,
+  logger,
+  saveAccountImportMapping,
+} from "@/adapters";
 import {
   ACTIVITY_SUBTYPES,
   ActivityType,
   ImportFormat,
   SUBTYPES_BY_ACTIVITY_TYPE,
 } from "@/lib/constants";
-import type { ActivityImport, SymbolSearchResult } from "@/lib/types";
+import type { ActivityImport, Asset, SymbolSearchResult } from "@/lib/types";
 import { tryParseDate } from "@/lib/utils";
+import { QueryKeys } from "@/lib/query-keys";
+import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { ProgressIndicator } from "@wealthfolio/ui/components/ui/progress-indicator";
 import { isValid, parse, parseISO } from "date-fns";
@@ -249,8 +257,45 @@ function mapSymbol(
   if (!csvSymbol) return { symbol: undefined };
 
   const trimmed = csvSymbol.trim();
-  const symbol = symbolMappings[trimmed] || trimmed;
-  const meta = symbolMappingMeta?.[trimmed];
+  const normalizeKey = (value: string): string =>
+    value
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, "")
+      .replace(/[^A-Z0-9]/g, "");
+
+  const upperTrimmed = trimmed.toUpperCase();
+  const normalizedTrimmed = normalizeKey(trimmed);
+
+  const directKey =
+    symbolMappings[trimmed] !== undefined
+      ? trimmed
+      : symbolMappings[upperTrimmed] !== undefined
+        ? upperTrimmed
+        : undefined;
+
+  let resolvedKey = directKey;
+  if (!resolvedKey) {
+    resolvedKey = Object.keys(symbolMappings).find((key) => {
+      const keyTrimmed = key.trim();
+      if (keyTrimmed.toUpperCase() === upperTrimmed) return true;
+      return normalizeKey(keyTrimmed) === normalizedTrimmed;
+    });
+  }
+
+  const symbol = resolvedKey ? symbolMappings[resolvedKey] : trimmed;
+
+  const metaKey = resolvedKey
+    ? resolvedKey
+    : symbolMappingMeta
+      ? Object.keys(symbolMappingMeta).find((key) => {
+          const keyTrimmed = key.trim();
+          if (keyTrimmed.toUpperCase() === upperTrimmed) return true;
+          return normalizeKey(keyTrimmed) === normalizedTrimmed;
+        })
+      : undefined;
+
+  const meta = metaKey ? symbolMappingMeta?.[metaKey] : symbolMappingMeta?.[trimmed];
   return {
     symbol,
     exchangeMic: meta?.exchangeMic,
@@ -460,6 +505,17 @@ function createDraftActivities(
     defaultCurrency: string;
   },
   defaultAccountId: string,
+  exactSymbolMatches?: Record<
+    string,
+    {
+      symbol: string;
+      exchangeMic?: string;
+      symbolName?: string;
+      quoteCcy?: string;
+      instrumentType?: string;
+      quoteMode?: string;
+    }
+  >,
 ): DraftActivity[] {
   const { fieldMappings, activityMappings, symbolMappings, accountMappings, symbolMappingMeta } =
     mapping;
@@ -480,6 +536,34 @@ function createDraftActivities(
     return row[idx];
   };
 
+  if (import.meta.env.DEV) {
+    const symbolHeader = fieldMappings[ImportFormat.SYMBOL];
+    const symbolIndex = symbolHeader ? headerIndex[symbolHeader] : undefined;
+    if (symbolIndex !== undefined) {
+      const uniqueRawSymbols = new Set<string>();
+      const mappedHits: string[] = [];
+      for (const row of parsedRows) {
+        const raw = row[symbolIndex]?.trim();
+        if (!raw) continue;
+        if (uniqueRawSymbols.has(raw)) continue;
+        uniqueRawSymbols.add(raw);
+        if (symbolMappings[raw] !== undefined) {
+          mappedHits.push(raw);
+        }
+      }
+
+      logger.warn(
+        "[ImportReview] draft build mapping hits",
+        JSON.stringify({
+          uniqueRawSymbols: uniqueRawSymbols.size,
+          mappingEntries: Object.keys(symbolMappings || {}).length,
+          directHitCount: mappedHits.length,
+          directHitPreview: mappedHits.slice(0, 20),
+        }),
+      );
+    }
+  }
+
   return parsedRows.map((row, rowIndex): DraftActivity => {
     // Extract raw values from CSV
     const rawDate = getColumnValue(row, ImportFormat.DATE);
@@ -499,6 +583,13 @@ function createDraftActivities(
     // Parse and normalize values
     const activityDate = parseDateValue(rawDate, dateFormat);
     const activityType = mapActivityType(rawType, activityMappings);
+    const exactMatch = rawSymbol?.trim()
+      ? (() => {
+          const rawKey = rawSymbol.trim().toUpperCase();
+          const normalizedKey = rawKey.replace(/\s+/g, "").replace(/[^A-Z0-9]/g, "");
+          return exactSymbolMatches?.[rawKey] || exactSymbolMatches?.[normalizedKey];
+        })()
+      : undefined;
     const {
       symbol: mappedSymbol,
       exchangeMic: mappedExchangeMic,
@@ -508,15 +599,37 @@ function createDraftActivities(
       quoteMode: mappedQuoteMode,
     } = mapSymbol(rawSymbol, symbolMappings, symbolMappingMeta);
 
+    // Also look up the canonical (mapped) symbol in the portfolio to fill missing metadata
+    // (e.g. MC→MC.PA: symbolMappingMeta may lack exchangeMic, but the portfolio asset has it)
+    const canonicalMatch = mappedSymbol?.trim()
+      ? (() => {
+          const canonicalKey = mappedSymbol.trim().toUpperCase();
+          const normalizedKey = canonicalKey.replace(/\s+/g, "").replace(/[^A-Z0-9]/g, "");
+          return exactSymbolMatches?.[canonicalKey] || exactSymbolMatches?.[normalizedKey];
+        })()
+      : undefined;
+
+    const effectiveSymbol = exactMatch?.symbol ?? mappedSymbol;
+    const effectiveExchangeMic =
+      exactMatch?.exchangeMic ?? mappedExchangeMic ?? canonicalMatch?.exchangeMic;
+    const effectiveSymbolName =
+      exactMatch?.symbolName ?? mappedSymbolName ?? canonicalMatch?.symbolName;
+    const effectiveQuoteCcy =
+      exactMatch?.quoteCcy ?? mappedQuoteCcy ?? canonicalMatch?.quoteCcy;
+    const effectiveInstrumentType =
+      exactMatch?.instrumentType ?? mappedInstrumentType ?? canonicalMatch?.instrumentType;
+    const effectiveQuoteMode =
+      exactMatch?.quoteMode ?? mappedQuoteMode ?? canonicalMatch?.quoteMode;
+
     // Parse typed symbol prefixes (e.g., "bond:US037833DU14")
     const { symbol: prefixParsedSymbol, instrumentType: prefixInstrumentType } =
-      splitInstrumentPrefixedSymbol(mappedSymbol);
+      splitInstrumentPrefixedSymbol(effectiveSymbol);
     const symbol = prefixParsedSymbol;
 
     // Normalize instrument type: explicit CSV column > prefix > symbol mapping meta
     const normalizedCsvInstrumentType = normalizeInstrumentType(rawInstrumentType);
     const resolvedInstrumentType =
-      normalizedCsvInstrumentType || prefixInstrumentType || mappedInstrumentType;
+      normalizedCsvInstrumentType || prefixInstrumentType || effectiveInstrumentType;
     const quantity = parseNumericValue(rawQuantity, decimalSeparator, thousandsSeparator);
     const unitPrice = parseNumericValue(rawUnitPrice, decimalSeparator, thousandsSeparator);
     const amount = parseNumericValue(rawAmount, decimalSeparator, thousandsSeparator);
@@ -545,11 +658,11 @@ function createDraftActivities(
       activityDate,
       activityType,
       symbol,
-      exchangeMic: mappedExchangeMic,
-      symbolName: mappedSymbolName,
-      quoteCcy: mappedQuoteCcy,
+      exchangeMic: effectiveExchangeMic,
+      symbolName: effectiveSymbolName,
+      quoteCcy: effectiveQuoteCcy,
       instrumentType: resolvedInstrumentType,
-      quoteMode: mappedQuoteMode,
+      quoteMode: effectiveQuoteMode,
       quantity,
       unitPrice,
       amount,
@@ -686,6 +799,30 @@ export function ReviewStep() {
             accountId,
             activities: activitiesToValidate,
           });
+
+          if (import.meta.env.DEV) {
+            const symbolFailures = validated
+              .filter((v) => {
+                const errs = v.errors || {};
+                return Boolean(errs.symbol && errs.symbol.length > 0);
+              })
+              .map((v) => ({
+                lineNumber: v.lineNumber,
+                symbol: v.symbol,
+                exchangeMic: v.exchangeMic,
+                instrumentType: v.instrumentType,
+                quoteMode: v.quoteMode,
+                errors: v.errors?.symbol,
+              }));
+
+            if (symbolFailures.length > 0) {
+              logger.warn(
+                "[ImportReview] backend symbol failures",
+                JSON.stringify(symbolFailures.slice(0, 20)),
+              );
+            }
+          }
+
           if (validationRun !== validationRunRef.current) {
             return;
           }
@@ -717,8 +854,9 @@ export function ReviewStep() {
               backendErrors.general = ["Validation failed"];
             }
 
-            const mergedErrors = mergeIssueMaps(draft.errors || {}, backendErrors);
-            const retainedWarnings = { ...(draft.warnings || {}) };
+            const localValidation = validateDraft(draft);
+            const mergedErrors = mergeIssueMaps(localValidation.errors, backendErrors);
+            const retainedWarnings = { ...localValidation.warnings };
             delete retainedWarnings._duplicate;
             const mergedWarnings = mergeIssueMaps(retainedWarnings, backendWarnings);
             const hasErrors = Object.keys(mergedErrors).length > 0;
@@ -762,40 +900,6 @@ export function ReviewStep() {
     },
     [accountId, dispatch, parseConfig.defaultCurrency],
   );
-
-  // Create draft activities and validate with backend when entering this step
-  useEffect(() => {
-    if (draftActivities.length === 0 && parsedRows.length > 0 && mapping) {
-      const drafts = createDraftActivities(
-        parsedRows,
-        headers,
-        {
-          fieldMappings: mapping.fieldMappings,
-          activityMappings: mapping.activityMappings,
-          symbolMappings: mapping.symbolMappings,
-          accountMappings: mapping.accountMappings || {},
-          symbolMappingMeta: mapping.symbolMappingMeta || {},
-        },
-        {
-          dateFormat: parseConfig.dateFormat,
-          decimalSeparator: parseConfig.decimalSeparator,
-          thousandsSeparator: parseConfig.thousandsSeparator,
-          defaultCurrency: parseConfig.defaultCurrency,
-        },
-        accountId,
-      );
-
-      void validateDraftsWithBackend(drafts);
-    }
-  }, [
-    parsedRows,
-    headers,
-    mapping,
-    parseConfig,
-    accountId,
-    draftActivities.length,
-    validateDraftsWithBackend,
-  ]);
 
   // Calculate filter stats
   const filterStats = useMemo<FilterStats>(() => {
@@ -844,14 +948,27 @@ export function ReviewStep() {
       // Find the current draft and merge with updates
       const currentDraft = draftActivities.find((d) => d.rowIndex === rowIndex);
       if (currentDraft) {
-        const mergedDraft = { ...currentDraft, ...updates };
+        const symbolChanged =
+          Object.prototype.hasOwnProperty.call(updates, "symbol") &&
+          updates.symbol !== currentDraft.symbol;
+        const sanitizedUpdates: Partial<DraftActivity> = symbolChanged
+          ? {
+              symbolName: undefined,
+              exchangeMic: undefined,
+              quoteCcy: undefined,
+              instrumentType: undefined,
+              quoteMode: undefined,
+              ...updates,
+            }
+          : updates;
+        const mergedDraft = { ...currentDraft, ...sanitizedUpdates };
         // Re-validate the merged draft
         const validation = validateDraft(mergedDraft);
         // Don't override status if it was explicitly skipped.
         const shouldRevalidateStatus = currentDraft.status !== "skipped";
         dispatch(
           updateDraft(rowIndex, {
-            ...updates,
+            ...sanitizedUpdates,
             ...(shouldRevalidateStatus
               ? {
                   status: validation.status,
@@ -990,6 +1107,340 @@ export function ReviewStep() {
       .sort((a, b) => (b.affectedCount ?? 0) - (a.affectedCount ?? 0));
   }, [draftActivities]);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    if (!mapping || unresolvedSymbols.length === 0) return;
+
+    const mappedPairs = Object.entries(mapping.symbolMappings || {}).slice(0, 12);
+    const unresolvedPreview = unresolvedSymbols.slice(0, 12).map((s) => s.csvSymbol);
+
+    logger.warn(
+      "[ImportReview] unresolved symbols remain",
+      JSON.stringify({
+        unresolvedCount: unresolvedSymbols.length,
+        unresolvedPreview,
+        symbolMappingsCount: Object.keys(mapping.symbolMappings || {}).length,
+        symbolMappingMetaCount: Object.keys(mapping.symbolMappingMeta || {}).length,
+        mappedPairs,
+      }),
+    );
+  }, [mapping, unresolvedSymbols]);
+
+  const { data: accountHoldings = [], isLoading: isHoldingsLoading } = useQuery({
+    queryKey: [QueryKeys.HOLDINGS, accountId],
+    queryFn: () => getHoldings(accountId),
+    enabled: !!accountId,
+  });
+
+  const { data: assets = [], isLoading: isAssetsLoading } = useQuery({
+    queryKey: [QueryKeys.ASSETS],
+    queryFn: () => getAssets(),
+  });
+
+  const assetsById = useMemo(() => {
+    return new Map(assets.map((asset) => [asset.id, asset]));
+  }, [assets]);
+
+  const preferredSymbolResults = useMemo<SymbolSearchResult[]>(() => {
+    const bySymbol = new Map<string, SymbolSearchResult>();
+
+    // 1) Prefer symbols currently held in the selected account.
+    for (const holding of accountHoldings) {
+      const symbol = holding.instrument?.symbol?.trim();
+      if (!symbol || bySymbol.has(symbol)) continue;
+
+      const instrumentName = holding.instrument?.name ?? symbol;
+      const existingAssetId = holding.instrument?.id;
+      const asset = existingAssetId ? assetsById.get(existingAssetId) : undefined;
+      const instrumentType = asset?.instrumentType ?? "EQUITY";
+
+      bySymbol.set(symbol, {
+        symbol,
+        exchange: "PORTFOLIO",
+        exchangeName: "Portfolio",
+        exchangeMic: asset?.instrumentExchangeMic ?? undefined,
+        shortName: instrumentName,
+        longName: instrumentName,
+        quoteType: instrumentType,
+        index: "portfolio",
+        score: 2000,
+        typeDisplay: instrumentType,
+        currency: holding.instrument?.currency ?? asset?.quoteCcy,
+        dataSource: asset?.quoteMode,
+        existingAssetId,
+      });
+    }
+
+    // 2) Add symbols from all known assets in the portfolio (cross-account fallback).
+    for (const asset of assets) {
+      const symbol = asset.instrumentSymbol?.trim();
+      if (!symbol) continue;
+      const instrumentType = asset.instrumentType ?? "EQUITY";
+      const name = asset.name ?? symbol;
+
+      const assetPayload: SymbolSearchResult = {
+        symbol,
+        exchange: "PORTFOLIO",
+        exchangeName: "Portfolio",
+        exchangeMic: asset.instrumentExchangeMic ?? undefined,
+        shortName: name,
+        longName: name,
+        quoteType: instrumentType,
+        index: "portfolio",
+        score: 1000,
+        typeDisplay: instrumentType,
+        currency: asset.quoteCcy,
+        dataSource: asset.quoteMode,
+        existingAssetId: asset.id,
+      };
+
+      const existing = bySymbol.get(symbol);
+      if (!existing) {
+        bySymbol.set(symbol, assetPayload);
+        continue;
+      }
+
+      // Preserve account-holdings priority while filling missing identity metadata from assets.
+      bySymbol.set(symbol, {
+        ...existing,
+        exchangeMic: existing.exchangeMic ?? assetPayload.exchangeMic,
+        shortName: existing.shortName || assetPayload.shortName,
+        longName: existing.longName || assetPayload.longName,
+        quoteType: existing.quoteType || assetPayload.quoteType,
+        typeDisplay: existing.typeDisplay || assetPayload.typeDisplay,
+        currency: existing.currency || assetPayload.currency,
+        dataSource: existing.dataSource || assetPayload.dataSource,
+        existingAssetId: existing.existingAssetId || assetPayload.existingAssetId,
+      });
+    }
+
+    return Array.from(bySymbol.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [accountHoldings, assets, assetsById]);
+
+  const exactPortfolioSymbolMatches = useMemo<
+    Record<
+      string,
+      {
+        symbol: string;
+        exchangeMic?: string;
+        symbolName?: string;
+        quoteCcy?: string;
+        instrumentType?: string;
+        quoteMode?: string;
+      }
+    >
+  >(() => {
+    const normalizeSymbolKey = (value: string): string =>
+      value
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, "")
+        .replace(/[^A-Z0-9]/g, "");
+
+    const baseSymbolKey = (value: string): string => {
+      const trimmed = value.trim().toUpperCase();
+      const dotIndex = trimmed.indexOf(".");
+      if (dotIndex > 0) {
+        return trimmed.slice(0, dotIndex);
+      }
+      return "";
+    };
+
+    const matches: Record<
+      string,
+      {
+        symbol: string;
+        exchangeMic?: string;
+        symbolName?: string;
+        quoteCcy?: string;
+        instrumentType?: string;
+        quoteMode?: string;
+      }
+    > = {};
+
+    const chooseRicherPayload = (
+      existing:
+        | {
+            symbol: string;
+            exchangeMic?: string;
+            symbolName?: string;
+            quoteCcy?: string;
+            instrumentType?: string;
+            quoteMode?: string;
+          }
+        | undefined,
+      candidate: {
+        symbol: string;
+        exchangeMic?: string;
+        symbolName?: string;
+        quoteCcy?: string;
+        instrumentType?: string;
+        quoteMode?: string;
+      },
+    ) => {
+      if (!existing) return candidate;
+
+      const score = (value: {
+        symbol: string;
+        exchangeMic?: string;
+        symbolName?: string;
+        quoteCcy?: string;
+        instrumentType?: string;
+        quoteMode?: string;
+      }) =>
+        (value.exchangeMic ? 8 : 0) +
+        (value.instrumentType ? 4 : 0) +
+        (value.quoteCcy ? 2 : 0) +
+        (value.symbolName ? 1 : 0);
+
+      const existingScore = score(existing);
+      const candidateScore = score(candidate);
+
+      if (candidateScore > existingScore) return candidate;
+
+      return {
+        ...existing,
+        exchangeMic: existing.exchangeMic ?? candidate.exchangeMic,
+        symbolName: existing.symbolName ?? candidate.symbolName,
+        quoteCcy: existing.quoteCcy ?? candidate.quoteCcy,
+        instrumentType: existing.instrumentType ?? candidate.instrumentType,
+        quoteMode: existing.quoteMode ?? candidate.quoteMode,
+      };
+    };
+    const baseAliasCandidates: Record<
+      string,
+      {
+        symbol: string;
+        exchangeMic?: string;
+        symbolName?: string;
+        quoteCcy?: string;
+        instrumentType?: string;
+        quoteMode?: string;
+      }[]
+    > = {};
+
+    for (const result of preferredSymbolResults) {
+      const rawKey = result.symbol.trim().toUpperCase();
+      if (!rawKey) continue;
+
+      const normalizedKey = normalizeSymbolKey(rawKey);
+      const payload = {
+        symbol: result.symbol,
+        exchangeMic: result.exchangeMic,
+        symbolName: result.longName,
+        quoteCcy: result.currency,
+        instrumentType: result.quoteType,
+        quoteMode: result.dataSource === "MANUAL" ? "MANUAL" : undefined,
+      };
+
+      if (!matches[rawKey]) {
+        matches[rawKey] = payload;
+      } else {
+        matches[rawKey] = chooseRicherPayload(matches[rawKey], payload);
+      }
+
+      if (normalizedKey) {
+        matches[normalizedKey] = chooseRicherPayload(matches[normalizedKey], payload);
+      }
+
+      const baseKey = baseSymbolKey(rawKey);
+      if (baseKey) {
+        if (!baseAliasCandidates[baseKey]) {
+          baseAliasCandidates[baseKey] = [];
+        }
+        baseAliasCandidates[baseKey].push(payload);
+      }
+    }
+
+    // Add base-symbol aliases only when unique to avoid ambiguous mappings
+    // (e.g. MC -> MC.PA, SAP -> SAP.FRK)
+    for (const [baseKey, candidates] of Object.entries(baseAliasCandidates)) {
+      if (candidates.length !== 1) continue;
+      matches[baseKey] = chooseRicherPayload(matches[baseKey], candidates[0]);
+    }
+
+    return matches;
+  }, [preferredSymbolResults]);
+
+  const draftBuildSignature = useMemo(
+    () =>
+      JSON.stringify({
+        accountId,
+        parseConfig: {
+          dateFormat: parseConfig.dateFormat,
+          decimalSeparator: parseConfig.decimalSeparator,
+          thousandsSeparator: parseConfig.thousandsSeparator,
+          defaultCurrency: parseConfig.defaultCurrency,
+        },
+        fieldMappings: mapping?.fieldMappings || {},
+        activityMappings: mapping?.activityMappings || {},
+        symbolMappings: mapping?.symbolMappings || {},
+        accountMappings: mapping?.accountMappings || {},
+        symbolMappingMeta: mapping?.symbolMappingMeta || {},
+        headerCount: headers.length,
+        rowCount: parsedRows.length,
+      }),
+    [accountId, parseConfig, mapping, headers.length, parsedRows.length],
+  );
+
+  const lastDraftBuildSignatureRef = useRef<string | null>(null);
+
+  // Create draft activities and validate with backend when entering this step.
+  // Wait for portfolio data to load so symbol auto-matching is populated.
+  useEffect(() => {
+    if (!parsedRows.length || !mapping || isHoldingsLoading || isAssetsLoading) {
+      return;
+    }
+
+    // Keep user edits intact once they started manually editing rows in review.
+    if (draftActivities.some((draft) => draft.isEdited)) {
+      return;
+    }
+
+    const hasBuiltBefore = lastDraftBuildSignatureRef.current !== null;
+    const hasSameSignature = lastDraftBuildSignatureRef.current === draftBuildSignature;
+    if (hasBuiltBefore && hasSameSignature && draftActivities.length > 0) {
+      return;
+    }
+
+    lastDraftBuildSignatureRef.current = draftBuildSignature;
+
+      const drafts = createDraftActivities(
+        parsedRows,
+        headers,
+        {
+          fieldMappings: mapping.fieldMappings,
+          activityMappings: mapping.activityMappings,
+          symbolMappings: mapping.symbolMappings,
+          accountMappings: mapping.accountMappings || {},
+          symbolMappingMeta: mapping.symbolMappingMeta || {},
+        },
+        {
+          dateFormat: parseConfig.dateFormat,
+          decimalSeparator: parseConfig.decimalSeparator,
+          thousandsSeparator: parseConfig.thousandsSeparator,
+          defaultCurrency: parseConfig.defaultCurrency,
+        },
+        accountId,
+        exactPortfolioSymbolMatches,
+      );
+
+      void validateDraftsWithBackend(drafts);
+  }, [
+    parsedRows,
+    headers,
+    mapping,
+    parseConfig,
+    accountId,
+    draftActivities.length,
+    draftActivities,
+    draftBuildSignature,
+    exactPortfolioSymbolMatches,
+    isHoldingsLoading,
+    isAssetsLoading,
+    validateDraftsWithBackend,
+  ]);
+
   // --- All hooks above this line ---
 
   // Show loading state while drafts are being created or validated
@@ -1051,6 +1502,7 @@ export function ReviewStep() {
       {/* Symbol resolution for unrecognized symbols */}
       <SymbolResolutionPanel
         unresolvedSymbols={unresolvedSymbols}
+        preferredResults={preferredSymbolResults}
         onApplyMappings={handleSymbolResolution}
       />
 

@@ -1,6 +1,7 @@
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::events::{DomainEvent, DomainEventSink, NoOpDomainEventSink};
 use crate::quotes::QuoteServiceTrait;
@@ -208,6 +209,8 @@ impl AssetService {
                 _ => Some(serde_json::json!({ "preferred_provider": "YAHOO" })),
             },
             QuoteMode::Manual => None,
+            // Internal YTM bonds price themselves via INTERNAL_BOND_MODEL provider; no external provider needed.
+            QuoteMode::InternalYtm => None,
         };
 
         let resolved_symbol = canonical
@@ -529,6 +532,8 @@ impl AssetServiceTrait for AssetService {
                 _ => Some(serde_json::json!({ "preferred_provider": "YAHOO" })),
             },
             QuoteMode::Manual => None,
+            // Internal YTM bonds price themselves via INTERNAL_BOND_MODEL provider; no external provider needed.
+            QuoteMode::InternalYtm => None,
         };
 
         let name = metadata.as_ref().and_then(|m| m.name.clone());
@@ -542,8 +547,17 @@ impl AssetServiceTrait for AssetService {
             Some(currency.as_str()),
         );
 
+        // If asset_id doesn't look like a UUID, generate one to avoid using symbols as IDs
+        let final_asset_id = if Uuid::parse_str(asset_id).is_ok() {
+            asset_id.to_string()
+        } else {
+            let new_uuid = Uuid::new_v4().to_string();
+            debug!("Generating UUID {} for non-UUID asset_id '{}'", new_uuid, asset_id);
+            new_uuid
+        };
+
         let new_asset = NewAsset {
-            id: Some(asset_id.to_string()),
+            id: Some(final_asset_id.clone()),
             kind,
             name,
             quote_mode,
@@ -562,7 +576,7 @@ impl AssetServiceTrait for AssetService {
 
         debug!(
             "Creating minimal asset: id={}, kind={:?}, quote_mode={:?}, name={:?}",
-            asset_id, new_asset.kind, new_asset.quote_mode, new_asset.name
+            final_asset_id, new_asset.kind, new_asset.quote_mode, new_asset.name
         );
 
         let asset = self.asset_repository.create(new_asset).await?;

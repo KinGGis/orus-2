@@ -6,6 +6,17 @@ import { SidebarNav } from "./sidebar-nav";
 
 const settingsSections = [
   {
+    title: "Account",
+    items: [
+      {
+        title: "My Account",
+        href: "account",
+        subtitle: "Profile, security, and sign out",
+        icon: <Icons.User className="size-5" />,
+      },
+    ],
+  },
+  {
     title: "Preferences",
     items: [
       {
@@ -78,6 +89,18 @@ const settingsSections = [
         icon: <Icons.CloudSync2 className="size-6 text-blue-400" />,
       },
       {
+        title: "Revolut Business",
+        href: "revolut",
+        subtitle: "Open Banking integration",
+        icon: <Icons.CreditCard className="size-5" />,
+      },
+      {
+        title: "SnapTrade",
+        href: "snaptrade",
+        subtitle: "Multi-broker aggregation",
+        icon: <Icons.Link className="size-5" />,
+      },
+      {
         title: "Market Data",
         href: "market-data",
         subtitle: "Providers, sync, and imports",
@@ -99,6 +122,17 @@ const settingsSections = [
         href: "addons",
         subtitle: "Extend Wealthfolio with features",
         icon: <Icons.Package className="size-5" />,
+      },
+    ],
+  },
+  {
+    title: "Orus Modules",
+    items: [
+      {
+        title: "Orus Integration",
+        href: "orus",
+        subtitle: "PE, Accounting, Shareholders",
+        icon: <Icons.Blocks className="size-5 text-purple-500" />,
       },
     ],
   },

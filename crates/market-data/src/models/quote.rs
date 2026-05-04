@@ -6,6 +6,89 @@ use super::instrument::InstrumentId;
 use super::provider_params::ProviderOverrides;
 use super::types::{Currency, ProviderId};
 
+// =============================================================================
+// Internal YTM bond pricing types
+// =============================================================================
+
+/// Source of the yield-to-maturity used for internal bond pricing.
+#[derive(Clone, Debug)]
+pub enum YtmSource {
+    /// Fixed YTM entered by the user (e.g. 0.0325 = 3.25 %)
+    Fixed(Decimal),
+    /// Market yield curve + a constant z-spread in basis points
+    CurvePlusSpread { spread_bps: Decimal },
+}
+
+/// Day-count convention for accrued-interest and year-fraction calculations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DayCountConvention {
+    ActAct,
+    Act365,
+    Act360,
+    Thirty360,
+}
+
+impl DayCountConvention {
+    /// Parse from a string representation (e.g. "ACT/ACT", "30/360").
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "ACT/ACT" => Some(Self::ActAct),
+            "ACT/365" => Some(Self::Act365),
+            "ACT/360" => Some(Self::Act360),
+            "30/360" => Some(Self::Thirty360),
+            _ => None,
+        }
+    }
+
+    /// Fraction of a year between two dates using this convention.
+    pub fn year_fraction(self, from: NaiveDate, to: NaiveDate) -> f64 {
+        let days = (to - from).num_days() as f64;
+        match self {
+            Self::ActAct => days / 365.25,
+            Self::Act365 => days / 365.0,
+            Self::Act360 => days / 360.0,
+            Self::Thirty360 => days / 360.0,
+        }
+    }
+}
+
+/// Whether the calculated price includes accrued interest (dirty) or not (clean).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PricingMethod {
+    /// Dirty price: clean price + accrued interest
+    Dirty,
+    /// Clean price only
+    Clean,
+}
+
+impl PricingMethod {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "DIRTY" => Some(Self::Dirty),
+            "CLEAN" => Some(Self::Clean),
+            _ => None,
+        }
+    }
+}
+
+/// All parameters needed to compute a daily bond price internally.
+#[derive(Clone, Debug)]
+pub struct BondYtmParams {
+    pub ytm_source: YtmSource,
+    pub day_count: DayCountConvention,
+    /// Settlement lag in calendar days (typically 1 for govt bonds)
+    pub settlement_days: i32,
+    /// Ex-coupon window in days before coupon date where accrued interest is zeroed
+    pub ex_coupon_days: i32,
+    pub pricing_method: PricingMethod,
+    /// Sorted coupon payment dates
+    pub coupon_schedule: Vec<NaiveDate>,
+}
+
+// =============================================================================
+// Bond quote metadata (for market-provider routing)
+// =============================================================================
+
 /// Bond metadata needed for yield-curve-based price calculation.
 #[derive(Clone, Debug)]
 pub struct BondQuoteMetadata {
@@ -36,6 +119,10 @@ pub struct QuoteContext {
 
     /// Bond metadata for yield-curve-based pricing (coupon, maturity, face value)
     pub bond_metadata: Option<BondQuoteMetadata>,
+
+    /// YTM parameters for internal daily dirty-price calculation.
+    /// Present only when asset.quote_mode == INTERNAL_YTM.
+    pub bond_ytm_params: Option<BondYtmParams>,
 }
 
 /// Market data quote

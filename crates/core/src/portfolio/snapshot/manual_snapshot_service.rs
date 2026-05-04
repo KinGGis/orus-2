@@ -6,7 +6,7 @@ use log::debug;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::assets::{AssetKind, AssetMetadata, AssetServiceTrait};
+use crate::assets::{AssetKind, AssetMetadata, AssetServiceTrait, InstrumentType};
 use crate::errors::Result;
 use crate::events::{DomainEvent, DomainEventSink, NoOpDomainEventSink};
 use crate::fx::FxServiceTrait;
@@ -29,6 +29,10 @@ pub struct ManualHoldingInput {
     pub data_source: Option<String>,
     /// Asset kind string (e.g., "INVESTMENT", "OTHER")
     pub asset_kind: Option<String>,
+    /// Instrument type override (e.g., "BOND", "EQUITY", "CRYPTO", "OPTION", "OTHER").
+    /// When provided for a new asset, sets the asset's `instrument_type` column
+    /// instead of letting it default to EQUITY.
+    pub instrument_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,12 +105,18 @@ impl ManualSnapshotService {
                 _ => None,
             };
 
+            let instrument_type = holding
+                .instrument_type
+                .as_deref()
+                .and_then(|s| InstrumentType::from_db_str(&s.to_uppercase()));
+
             let metadata = AssetMetadata {
                 instrument_symbol: Some(holding.symbol.clone()),
                 instrument_exchange_mic: holding.exchange_mic.clone(),
                 display_code: Some(holding.symbol.clone()),
                 name: holding.name.clone(),
                 kind,
+                instrument_type,
                 ..Default::default()
             };
 

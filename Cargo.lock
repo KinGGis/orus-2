@@ -1453,16 +1453,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9b6c2fc184a6fb6ebcf5f9a5e3bbfa84d8fd268cdfcce4ed508979a6259494d"
 dependencies = [
  "bigdecimal",
+ "bitflags 2.10.0",
+ "byteorder",
  "chrono",
  "diesel_derives",
  "downcast-rs",
+ "itoa",
  "libsqlite3-sys",
  "num-bigint",
  "num-integer",
  "num-traits",
+ "pq-sys",
  "r2d2",
+ "serde_json",
  "sqlite-wasm-rs",
  "time",
+ "uuid",
 ]
 
 [[package]]
@@ -4588,6 +4594,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "pq-sys"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "574ddd6a267294433f140b02a726b0640c43cf7c6f717084684aaa3b285aba61"
+dependencies = [
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -7903,6 +7920,7 @@ version = "3.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "csv",
@@ -7911,6 +7929,8 @@ dependencies = [
  "diesel_migrations",
  "futures",
  "hex",
+ "hmac",
+ "jsonwebtoken",
  "log",
  "num-traits",
  "proptest",
@@ -8026,6 +8046,23 @@ dependencies = [
  "wealthfolio-device-sync",
  "wealthfolio-market-data",
  "wealthfolio-storage-sqlite",
+]
+
+[[package]]
+name = "wealthfolio-storage-postgres"
+version = "3.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "diesel",
+ "diesel_migrations",
+ "log",
+ "r2d2",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+ "wealthfolio-core",
 ]
 
 [[package]]

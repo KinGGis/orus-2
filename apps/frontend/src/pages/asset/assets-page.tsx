@@ -25,9 +25,11 @@ import { ParsedAsset, toParsedAsset } from "./asset-utils";
 import { AssetsTable } from "./assets-table";
 import { AssetsTableMobile } from "./assets-table-mobile";
 import { CreateSecurityDialog } from "./create-security-dialog";
+import type { ResolvedClassifications } from "./create-security-dialog";
 import { useAssetManagement } from "./hooks/use-asset-management";
 import { useAssets } from "./hooks/use-assets";
 import { useLatestQuotes } from "./hooks/use-latest-quotes";
+import { useAssignAssetToCategory, useTaxonomies } from "@/hooks/use-taxonomies";
 
 export default function AssetsPage() {
   const { assets, isLoading } = useAssets();
@@ -55,6 +57,111 @@ export default function AssetsPage() {
   const [editingAsset, setEditingAsset] = useState<ParsedAsset | null>(null);
   const [assetPendingDelete, setAssetPendingDelete] = useState<ParsedAsset | null>(null);
   const [assetPendingRefetch, setAssetPendingRefetch] = useState<ParsedAsset | null>(null);
+
+  // Taxonomy data needed to apply default Bond classifications after asset creation.
+  const { data: allTaxonomies = [] } = useTaxonomies();
+  const assignAssetToCategory = useAssignAssetToCategory();
+
+  /**
+   * After a security is successfully created, persist the resolved
+   * classifications (region/sector picked via fuzzy match) and, when the
+   * asset is a bond, also auto-assign the default Instrument-Type and
+   * Asset-Class categories ("Bonds" / "Fixed Income"). Failures are logged
+   * but not surfaced as errors so they never block the creation flow.
+   */
+  const applyClassificationsAfterCreate = async (
+    assetId: string,
+    classifications: ResolvedClassifications,
+  ) => {
+    const tasks: Array<Promise<unknown>> = [];
+
+    if (classifications.region) {
+      tasks.push(
+        assignAssetToCategory.mutateAsync({
+          assetId,
+          taxonomyId: classifications.region.taxonomyId,
+          categoryId: classifications.region.categoryId,
+          weight: 10000,
+          source: "manual",
+        }),
+      );
+    }
+    if (classifications.sector) {
+      tasks.push(
+        assignAssetToCategory.mutateAsync({
+          assetId,
+          taxonomyId: classifications.sector.taxonomyId,
+          categoryId: classifications.sector.categoryId,
+          weight: 10000,
+          source: "manual",
+        }),
+      );
+    }
+    if (classifications.autoBondClassify) {
+      // Look up the Instrument Type and Asset Classes taxonomies, then find
+      // their "Bonds" / "Fixed Income" categories. We accept a few common
+      // variants of the names/keys so this stays robust to taxonomy edits.
+      const findTaxonomy = (predicates: Array<(name: string) => boolean>) =>
+        allTaxonomies.find((t) => predicates.some((p) => p(t.name.toLowerCase())));
+      const instrumentTypeTaxonomy = findTaxonomy([
+        (n) => n.includes("instrument type"),
+        (n) => n === "instrument types",
+      ]);
+      const assetClassTaxonomy = findTaxonomy([
+        (n) => n.includes("asset class"),
+      ]);
+
+      const enqueueBondCategory = async (
+        taxonomyId: string,
+        wantedKeys: string[],
+        wantedNames: string[],
+      ) => {
+        try {
+          const { getTaxonomy } = await import("@/adapters");
+          const detail = await getTaxonomy(taxonomyId);
+          if (!detail) return;
+          const cat = detail.categories.find(
+            (c) =>
+              wantedKeys.includes(c.key?.toUpperCase() ?? "") ||
+              wantedNames.some(
+                (n) => c.name.toLowerCase() === n.toLowerCase(),
+              ),
+          );
+          if (!cat) return;
+          await assignAssetToCategory.mutateAsync({
+            assetId,
+            taxonomyId,
+            categoryId: cat.id,
+            weight: 10000,
+            source: "auto",
+          });
+        } catch {
+          // Swallow — auto-classification is best-effort.
+        }
+      };
+
+      if (instrumentTypeTaxonomy) {
+        tasks.push(
+          enqueueBondCategory(
+            instrumentTypeTaxonomy.id,
+            ["BOND_CORPORATE", "BOND", "BONDS"],
+            ["Bonds", "Bond", "Corporate Bond", "Corporate Bonds"],
+          ),
+        );
+      }
+      if (assetClassTaxonomy) {
+        tasks.push(
+          enqueueBondCategory(
+            assetClassTaxonomy.id,
+            ["FIXED_INCOME", "FIXEDINCOME", "BONDS"],
+            ["Fixed Income", "Bonds"],
+          ),
+        );
+      }
+    }
+
+    await Promise.allSettled(tasks);
+  };
 
   const handleDelete = async () => {
     if (!assetPendingDelete) return;
@@ -162,9 +269,12 @@ export default function AssetsPage() {
       <CreateSecurityDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onSubmit={(payload) => {
+        onSubmit={(payload, classifications) => {
           createAssetMutation.mutate(payload, {
-            onSuccess: () => setCreateDialogOpen(false),
+            onSuccess: (asset) => {
+              setCreateDialogOpen(false);
+              void applyClassificationsAfterCreate(asset.id, classifications);
+            },
           });
         }}
         isPending={createAssetMutation.isPending}

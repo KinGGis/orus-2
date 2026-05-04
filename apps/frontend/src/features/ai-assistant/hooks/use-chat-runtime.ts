@@ -16,6 +16,7 @@ import {
 } from "@assistant-ui/react";
 import { useMemo, useCallback, useRef, useState } from "react";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import * as XLSX from "xlsx";
 
 import { streamChatResponse, type ChatModelConfig } from "../api";
 import type { AiThread, ChatMessage, ChatThread, ThreadPage } from "../types";
@@ -206,18 +207,86 @@ interface ThreadListItemData {
 }
 
 /**
- * CSV attachment adapter for importing activity data.
- * Accepts CSV files and reads content as text for AI processing.
+ * Supported file extensions for the file attachment adapter.
  */
-const csvAttachmentAdapter: AttachmentAdapter = {
-  accept: ".csv,text/csv,application/csv",
+const SUPPORTED_EXTENSIONS = [
+  // Spreadsheets
+  ".csv",
+  ".xlsx",
+  ".xls",
+  // Text files
+  ".txt",
+  ".md",
+  ".json",
+  ".xml",
+  ".yaml",
+  ".yml",
+  // Code files
+  ".js",
+  ".ts",
+  ".py",
+  ".sql",
+  ".html",
+  ".css",
+].join(",");
+
+/**
+ * Convert Excel file (xlsx/xls) to CSV string.
+ */
+async function excelToCSV(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: "array" });
+  
+  // Get the first sheet
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error("Excel file has no sheets");
+  }
+  
+  const worksheet = workbook.Sheets[firstSheetName];
+  if (!worksheet) {
+    throw new Error("Could not read worksheet");
+  }
+  
+  // Convert to CSV
+  return XLSX.utils.sheet_to_csv(worksheet);
+}
+
+/**
+ * Determine if file is an Excel file based on extension or MIME type.
+ */
+function isExcelFile(file: File): boolean {
+  const ext = file.name.toLowerCase().split(".").pop();
+  return (
+    ext === "xlsx" ||
+    ext === "xls" ||
+    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    file.type === "application/vnd.ms-excel"
+  );
+}
+
+/**
+ * Determine if file is a CSV file based on extension or MIME type.
+ */
+function isCSVFile(file: File): boolean {
+  const ext = file.name.toLowerCase().split(".").pop();
+  return ext === "csv" || file.type === "text/csv" || file.type === "application/csv";
+}
+
+/**
+ * File attachment adapter for importing various document types.
+ * Accepts CSV, Excel, text files, JSON, etc.
+ * Excel files are automatically converted to CSV format.
+ */
+const fileAttachmentAdapter: AttachmentAdapter = {
+  accept: SUPPORTED_EXTENSIONS,
 
   async add({ file }): Promise<PendingAttachment> {
     return {
       id: generateId(),
       type: "document",
       name: file.name,
-      contentType: file.type || "text/csv",
+      contentType: file.type || "application/octet-stream",
       file,
       status: { type: "requires-action", reason: "composer-send" },
     };
@@ -228,17 +297,38 @@ const csvAttachmentAdapter: AttachmentAdapter = {
   },
 
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
-    // Read CSV file content as text
-    const csvContent = await attachment.file.text();
+    let textContent: string;
+    let processedFileName = attachment.name;
+    
+    try {
+      if (isExcelFile(attachment.file)) {
+        // Convert Excel to CSV
+        textContent = await excelToCSV(attachment.file);
+        // Update filename to indicate conversion
+        processedFileName = attachment.name.replace(/\.(xlsx|xls)$/i, ".csv");
+      } else {
+        // Read as text for all other file types
+        textContent = await attachment.file.text();
+      }
+    } catch (error) {
+      // If reading fails, provide error message
+      textContent = `[Error reading file: ${error instanceof Error ? error.message : "Unknown error"}]`;
+    }
+
+    // For CSV files (original or converted), add instruction for AI
+    const isCSV = isCSVFile(attachment.file) || isExcelFile(attachment.file);
+    const instruction = isCSV
+      ? `[INSTRUCTION: A CSV file is attached. You MUST call the import_csv tool with the full CSV content in csvContent parameter. Do NOT analyze or summarize the data yourself - use the tool.]\n\n`
+      : `[Attached file: ${processedFileName}]\n\n`;
 
     return {
       id: attachment.id,
       type: "document",
-      name: attachment.name,
-      contentType: attachment.contentType,
+      name: processedFileName,
+      contentType: isCSV ? "text/csv" : attachment.contentType,
       status: { type: "complete" },
-      // Store CSV content as text part for AI to process
-      content: [{ type: "text", text: csvContent }],
+      // Store file content as text part for AI to process
+      content: [{ type: "text", text: instruction + textContent }],
     };
   },
 };
@@ -447,34 +537,29 @@ export function useChatRuntime(config?: ChatModelConfig) {
         .map((part) => part.text)
         .join("\n");
 
-      // Extract CSV attachment content if present
-      // Attachments are processed by csvAttachmentAdapter.send() which stores content as text parts
+      // Extract file attachment content if present
+      // Attachments are processed by fileAttachmentAdapter.send() which stores content as text parts
       let attachmentContent = "";
       const attachmentNames: string[] = [];
-      let hasCsvAttachment = false;
       if (message.attachments && message.attachments.length > 0) {
         for (const attachment of message.attachments) {
           attachmentNames.push(attachment.name);
           if (attachment.content) {
-            const csvText = attachment.content
+            const fileText = attachment.content
               .filter((part): part is { type: "text"; text: string } => part.type === "text")
               .map((part) => part.text)
               .join("\n");
-            if (csvText) {
-              hasCsvAttachment = true;
-              // Format attachment content with metadata for AI
-              attachmentContent += `\n\n[Attached CSV file: ${attachment.name}]\n${csvText}`;
+            if (fileText) {
+              // Attachment content already includes header and instructions from adapter
+              attachmentContent += `\n\n${fileText}`;
             }
           }
         }
       }
 
       // Content for AI includes both text and attachment content
-      // For CSV files, prepend explicit tool instruction for smaller models
-      let contentForAi = textContent + attachmentContent;
-      if (hasCsvAttachment) {
-        contentForAi = `[INSTRUCTION: A CSV file is attached. You MUST call the import_csv tool with the full CSV content in csvContent parameter. Do NOT analyze or summarize the data yourself - use the tool.]\n\n${contentForAi}`;
-      }
+      // Instructions are already included by fileAttachmentAdapter for CSV/Excel files
+      const contentForAi = textContent + attachmentContent;
 
       if (!contentForAi.trim()) return;
       const initialThreadTitle = deriveInitialThreadTitle(
@@ -839,7 +924,7 @@ export function useChatRuntime(config?: ChatModelConfig) {
       onEdit: handleEdit,
       onCancel: handleCancel,
       adapters: {
-        attachments: csvAttachmentAdapter,
+        attachments: fileAttachmentAdapter,
         threadList: {
           threadId: currentThreadId ?? undefined,
           isLoading: isThreadListLoading,

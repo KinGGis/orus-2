@@ -35,10 +35,12 @@ pub async fn get_holdings(
     Query(q): Query<HoldingsQuery>,
 ) -> ApiResult<Json<Vec<Holding>>> {
     let base = state.base_currency.read().unwrap().clone();
+    tracing::info!("get_holdings called for account_id={}, base={}", q.account_id, base);
     let holdings = state
         .holdings_service
         .get_holdings(&q.account_id, &base)
         .await?;
+    tracing::info!("get_holdings returning {} holdings for account {}", holdings.len(), q.account_id);
     Ok(Json(holdings))
 }
 
@@ -358,6 +360,7 @@ pub async fn save_manual_holdings_handler(
             name: holding.name,
             data_source: holding.data_source,
             asset_kind: holding.asset_kind,
+            instrument_type: holding.instrument_type,
         });
     }
 
@@ -610,6 +613,7 @@ async fn import_single_snapshot_impl(
             name: None,
             data_source: None,
             asset_kind: None,
+            instrument_type: None,
         });
     }
 

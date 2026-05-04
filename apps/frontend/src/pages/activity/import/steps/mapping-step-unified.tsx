@@ -15,7 +15,7 @@ import { getAccounts } from "@/adapters";
 import { isCashSymbol, isSymbolRequired } from "@/lib/activity-utils";
 import { IMPORT_REQUIRED_FIELDS, ImportFormat } from "@/lib/constants";
 import { QueryKeys } from "@/lib/query-keys";
-import type { Account, CsvRowData } from "@/lib/types";
+import type { Account, CsvRowData, SymbolSearchResult } from "@/lib/types";
 
 export function MappingStepUnified() {
   const { state, dispatch } = useImportContext();
@@ -62,6 +62,39 @@ export function MappingStepUnified() {
   useEffect(() => {
     dispatch(setMapping(localMapping));
   }, [localMapping, dispatch]);
+
+  const handleSymbolMappingWithSync = useCallback(
+    (csvSymbol: string, newSymbol: string, searchResult?: SymbolSearchResult) => {
+      const csvKey = csvSymbol.trim();
+      const resolvedSymbol = newSymbol.trim();
+
+      const syncedMapping = {
+        ...localMapping,
+        symbolMappings: {
+          ...localMapping.symbolMappings,
+          [csvKey]: resolvedSymbol,
+        },
+        symbolMappingMeta: {
+          ...(localMapping.symbolMappingMeta || {}),
+          ...(searchResult
+            ? {
+                [csvKey]: {
+                  exchangeMic: searchResult.exchangeMic,
+                  symbolName: searchResult.longName,
+                  quoteCcy: searchResult.currency,
+                  instrumentType: searchResult.quoteType,
+                  quoteMode: searchResult.dataSource === "MANUAL" ? "MANUAL" : undefined,
+                },
+              }
+            : {}),
+        },
+      };
+
+      dispatch(setMapping(syncedMapping));
+      handleSymbolMapping(csvSymbol, newSymbol, searchResult);
+    },
+    [dispatch, handleSymbolMapping, localMapping],
+  );
 
   // Helper to get mapped value from row
   const getMappedValue = useCallback(
@@ -388,7 +421,7 @@ export function MappingStepUnified() {
                 accounts={accounts}
                 handleColumnMapping={handleColumnMapping}
                 handleActivityTypeMapping={handleActivityTypeMapping}
-                handleSymbolMapping={handleSymbolMapping}
+                handleSymbolMapping={handleSymbolMappingWithSync}
                 handleAccountIdMapping={handleAccountIdMapping}
                 getMappedValue={getMappedValue}
                 invalidSymbols={invalidSymbols}

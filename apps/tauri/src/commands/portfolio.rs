@@ -388,6 +388,8 @@ pub struct HoldingInput {
     pub data_source: Option<String>,
     /// Asset kind (e.g., "INVESTMENT", "OTHER")
     pub asset_kind: Option<String>,
+    /// Instrument type override (e.g., "BOND", "EQUITY", "CRYPTO", "OPTION", "OTHER").
+    pub instrument_type: Option<String>,
 }
 
 /// Saves manual holdings for a HOLDINGS-mode account.
@@ -450,6 +452,7 @@ pub async fn save_manual_holdings(
             name: holding.name,
             data_source: holding.data_source,
             asset_kind: holding.asset_kind,
+            instrument_type: holding.instrument_type,
         });
     }
 
@@ -821,6 +824,7 @@ async fn import_single_snapshot(
             name: None,
             data_source: None,
             asset_kind: None,
+            instrument_type: None,
         });
     }
 

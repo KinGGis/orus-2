@@ -33,7 +33,8 @@ import { z } from "zod";
 
 // Simplified asset types for the form (values are InstrumentType)
 const ASSET_TYPE_OPTIONS = [
-  { value: "EQUITY", label: "Security (Stock, ETF, Bond)" },
+  { value: "EQUITY", label: "Security (Stock, ETF)" },
+  { value: "BOND", label: "Bond" },
   { value: "CRYPTO", label: "Cryptocurrency" },
   { value: "OTHER", label: "Other" },
 ] as const;
@@ -45,7 +46,7 @@ const customAssetSchema = z.object({
     .max(20, "Symbol must be 20 characters or less")
     .transform((val) => val.toUpperCase().trim()),
   name: z.string().min(1, "Name is required").max(100, "Name must be 100 characters or less"),
-  assetType: z.enum(["EQUITY", "CRYPTO", "OTHER"]),
+  assetType: z.enum(["EQUITY", "BOND", "CRYPTO", "OTHER"]),
   currency: z.string().min(1, "Currency is required"),
 });
 
@@ -106,7 +107,9 @@ export function CreateCustomAssetDialog({
           ? "CRYPTOCURRENCY"
           : values.assetType === "OTHER"
             ? "OTHER"
-            : "EQUITY",
+            : values.assetType === "BOND"
+              ? "BOND"
+              : "EQUITY",
       index: "MANUAL",
       typeDisplay: "Custom Asset",
       dataSource: "MANUAL",

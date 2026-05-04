@@ -1,0 +1,31 @@
+[package]
+name = "wealthfolio-storage-postgres"
+version.workspace = true
+edition.workspace = true
+description = "PostgreSQL storage implementation for Wealthfolio"
+authors = ["Aziz Fadil"]
+license = "AGPL-3.0"
+
+[features]
+default = []
+
+[dependencies]
+# Internal crates
+wealthfolio-core = { workspace = true }
+
+# Workspace dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+
+# PostgreSQL / Diesel
+diesel = { version = "2.2", features = ["postgres", "chrono", "r2d2", "numeric", "uuid", "serde_json"] }
+diesel_migrations = "2.2"
+r2d2 = { workspace = true }
+
+[lints]
+workspace = true

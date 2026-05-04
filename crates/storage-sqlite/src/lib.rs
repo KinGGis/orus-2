@@ -40,9 +40,11 @@ pub mod health;
 pub mod limits;
 pub mod market_data;
 pub mod portfolio;
+pub mod revolut;
 pub mod settings;
 pub mod sync;
 pub mod taxonomies;
+pub mod users;
 
 // Re-export database utilities
 pub use db::{

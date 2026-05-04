@@ -566,7 +566,7 @@ export interface Asset {
   isActive?: boolean;
 
   // Valuation
-  quoteMode: "MARKET" | "MANUAL";
+  quoteMode: "MARKET" | "MANUAL" | "INTERNAL_YTM";
   quoteCcy: string; // Currency prices/valuations are quoted in
 
   // Instrument identity (null for non-market assets)
@@ -844,6 +844,7 @@ export interface UpdateAssetProfile {
   instrumentType?: string | null;
   instrumentExchangeMic?: string | null;
   providerConfig?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 // Rename ComparisonItem to TrackedItem

@@ -40,12 +40,15 @@ mod market_data;
 mod net_worth;
 mod performance;
 mod portfolio;
+mod revolut;
 mod secrets;
 mod settings;
+mod snaptrade;
 pub mod shared;
 #[cfg(feature = "device-sync")]
 mod sync_crypto;
 mod taxonomies;
+mod users;
 
 #[utoipa::path(get, path = "/api/v1/healthz", responses((status = 200, description = "Health")))]
 pub async fn healthz() -> &'static str {
@@ -104,7 +107,11 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
         .merge(alternative_assets::router())
         .merge(ai_providers::router())
         .merge(ai_chat::router())
-        .merge(health::router());
+        .merge(health::router())
+        // DFC-specific routes
+        .merge(users::router())
+        .merge(revolut::router())
+        .merge(snaptrade::router());
 
     #[cfg(feature = "device-sync")]
     {

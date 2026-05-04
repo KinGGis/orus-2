@@ -17,10 +17,13 @@ pub mod health;
 pub mod limits;
 pub mod portfolio;
 pub mod quotes;
+pub mod revolut;
 pub mod secrets;
 pub mod settings;
+pub mod snaptrade;
 pub mod sync;
 pub mod taxonomies;
+pub mod users;
 pub mod utils;
 
 // Re-export common types from asset and portfolio modules

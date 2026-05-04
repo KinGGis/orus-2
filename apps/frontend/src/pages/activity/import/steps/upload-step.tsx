@@ -40,6 +40,171 @@ import {
 } from "../context/import-actions";
 import { useImportContext, type ParseConfig } from "../context/import-context";
 
+const SNAPTRADE_THOT_IMPORT_DRAFT_KEY = "snaptrade_thot_import_draft_v1";
+
+interface SnaptradeThotImportDraft {
+  accountId: string;
+  fileName: string;
+  fileType: string;
+  lastModified: number;
+  content: string;
+  source: string;
+  createdAt: string;
+}
+
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      fields.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  fields.push(current.trim());
+  return fields;
+}
+
+function stringifyCsvValue(value: string): string {
+  const escaped = value.replace(/"/g, '""');
+  return /[",\n\r]/.test(value) ? `"${escaped}"` : value;
+}
+
+function normalizeNumber(input: string | undefined): number {
+  if (!input) return 0;
+  const cleaned = input.replace(/,/g, "").trim();
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isIbkrActivityStatement(rows: string[][]): boolean {
+  if (rows.length < 2) return false;
+  const first = rows[0] ?? [];
+  const hasStatementHeader = first[0] === "Statement" && first[1] === "Header";
+  const hasTradesSection = rows.some((r) => r[0] === "Trades" && r[1] === "Header");
+  return hasStatementHeader && hasTradesSection;
+}
+
+async function transformIbkrStatementIfNeeded(file: File): Promise<File> {
+  if (!file.name.toLowerCase().endsWith(".csv")) return file;
+
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const rows = lines.map(parseCsvLine);
+
+  if (!isIbkrActivityStatement(rows)) {
+    return file;
+  }
+
+  const tradesHeaderRow = rows.find((r) => r[0] === "Trades" && r[1] === "Header");
+  if (!tradesHeaderRow) {
+    return file;
+  }
+
+  const header = tradesHeaderRow.slice(2);
+  const col = (name: string) => header.indexOf(name);
+
+  const idxDataDiscriminator = col("DataDiscriminator");
+  const idxDate = col("Date/Time");
+  const idxSymbol = col("Symbol");
+  const idxQuantity = col("Quantity");
+  const idxTradePrice = col("T. Price");
+  const idxProceeds = col("Proceeds");
+  const idxCurrency = col("Currency");
+  const idxFee = col("Comm/Fee");
+  const idxCode = col("Code");
+
+  const outputHeaders = [
+    "date",
+    "activityType",
+    "symbol",
+    "quantity",
+    "unitPrice",
+    "amount",
+    "currency",
+    "fee",
+    "comment",
+    "subtype",
+  ];
+
+  const outputRows: string[][] = [];
+
+  for (const row of rows) {
+    if (row[0] !== "Trades" || row[1] !== "Data") continue;
+
+    const payload = row.slice(2);
+    const discriminator = idxDataDiscriminator >= 0 ? payload[idxDataDiscriminator] : "";
+    if (discriminator !== "Order") continue;
+
+    const date = idxDate >= 0 ? payload[idxDate] : "";
+    const symbol = idxSymbol >= 0 ? payload[idxSymbol] : "";
+    const quantityRaw = idxQuantity >= 0 ? payload[idxQuantity] : "";
+    const unitPriceRaw = idxTradePrice >= 0 ? payload[idxTradePrice] : "";
+    const proceedsRaw = idxProceeds >= 0 ? payload[idxProceeds] : "";
+    const currency = idxCurrency >= 0 ? payload[idxCurrency] : "";
+    const feeRaw = idxFee >= 0 ? payload[idxFee] : "";
+    const subtype = idxCode >= 0 ? payload[idxCode] : "";
+
+    if (!date || !symbol || !quantityRaw) continue;
+
+    const quantitySigned = normalizeNumber(quantityRaw);
+    if (quantitySigned === 0) continue;
+
+    const quantityAbs = Math.abs(quantitySigned);
+    const unitPriceAbs = Math.abs(normalizeNumber(unitPriceRaw));
+    const proceedsAbs = Math.abs(normalizeNumber(proceedsRaw));
+    const amount = proceedsAbs > 0 ? proceedsAbs : quantityAbs * unitPriceAbs;
+    const fee = Math.abs(normalizeNumber(feeRaw));
+    const activityType = quantitySigned < 0 ? "SELL" : "BUY";
+
+    outputRows.push([
+      date,
+      activityType,
+      symbol,
+      quantityAbs.toString(),
+      unitPriceAbs.toString(),
+      amount.toString(),
+      currency,
+      fee.toString(),
+      "IBKR Activity Statement",
+      subtype,
+    ]);
+  }
+
+  if (outputRows.length === 0) {
+    return file;
+  }
+
+  const csvContent = [
+    outputHeaders.join(","),
+    ...outputRows.map((r) => r.map(stringifyCsvValue).join(",")),
+  ].join("\n");
+
+  const transformedName = file.name.replace(/\.csv$/i, "") + "_wf_activities.csv";
+  return new File([csvContent], transformedName, {
+    type: "text/csv",
+    lastModified: Date.now(),
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CSV Preview Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -536,10 +701,11 @@ export function UploadStep() {
   });
 
   const handleFileSelect = useCallback(
-    (file: File | null) => {
+    async (file: File | null) => {
       if (file) {
-        dispatch(setFile(file));
-        parseFile(file);
+        const transformedFile = await transformIbkrStatementIfNeeded(file);
+        dispatch(setFile(transformedFile));
+        parseFile(transformedFile);
       } else {
         dispatch(setFile(null as unknown as File));
         dispatch(setParsedData([], []));
@@ -547,6 +713,29 @@ export function UploadStep() {
     },
     [dispatch, parseFile],
   );
+
+  useEffect(() => {
+    if (state.file) return;
+
+    const raw = window.sessionStorage.getItem(SNAPTRADE_THOT_IMPORT_DRAFT_KEY);
+    if (!raw) return;
+
+    try {
+      const draft = JSON.parse(raw) as SnaptradeThotImportDraft;
+      if (!draft?.content || !draft?.fileName) return;
+      if (state.accountId && draft.accountId && draft.accountId !== state.accountId) return;
+
+      const file = new File([draft.content], draft.fileName, {
+        type: draft.fileType || "text/csv",
+        lastModified: draft.lastModified || Date.now(),
+      });
+
+      handleFileSelect(file);
+      window.sessionStorage.removeItem(SNAPTRADE_THOT_IMPORT_DRAFT_KEY);
+    } catch {
+      window.sessionStorage.removeItem(SNAPTRADE_THOT_IMPORT_DRAFT_KEY);
+    }
+  }, [state.file, state.accountId, handleFileSelect]);
 
   // Re-parse when settings change
   const handleConfigChange = useCallback(

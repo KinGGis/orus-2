@@ -1,6 +1,7 @@
 import { getDynamicNavItems, subscribeToNavigationUpdates } from "@/addons/addons-runtime-context";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
+import { useModuleVisibility } from "@/features/orus-integration";
 
 export interface NavLink {
   title: string;
@@ -8,6 +9,7 @@ export interface NavLink {
   icon?: React.ReactNode;
   keywords?: string[];
   label?: string; // Optional descriptive label for launcher/search
+  moduleKey?: string; // Optional key to check module visibility
 }
 
 export interface NavigationProps {
@@ -56,16 +58,58 @@ const staticNavigation: NavigationProps = {
   ],
   secondary: [
     {
+      icon: <Icons.Briefcase className="size-6" />,
+      title: "Private Equity",
+      href: "/private-equity",
+      keywords: ["pe", "private equity", "investments", "companies"],
+      label: "Private Equity",
+      moduleKey: "privateEquity",
+    },
+    {
+      icon: <Icons.Receipt className="size-6" />,
+      title: "Accounting",
+      href: "/accounting",
+      keywords: ["accounting", "journal", "entries", "bookkeeping"],
+      label: "Accounting",
+      moduleKey: "accounting",
+    },
+    {
+      icon: <Icons.Users className="size-6" />,
+      title: "Shareholders",
+      href: "/shareholders",
+      keywords: ["shareholders", "ownership", "equity", "participations"],
+      label: "Shareholders",
+      moduleKey: "shareholder",
+    },
+    {
+      icon: <Icons.FileText className="size-6" />,
+      title: "Reports",
+      href: "/reports",
+      keywords: ["reports", "reporting", "gamma", "presentation", "pdf"],
+      label: "Reports & Presentations",
+      moduleKey: "reports",
+    },
+    {
+      icon: <Icons.Shield className="size-6" />,
+      title: "Administration",
+      href: "/administration",
+      keywords: ["admin", "administration", "users", "permissions", "ibkr", "revolut"],
+      label: "Administration",
+      moduleKey: "admin",
+    },
+    {
       icon: <Icons.Settings className="size-6" />,
       title: "Settings",
       href: "/settings",
       keywords: ["preferences", "config", "configuration"],
+      // Settings is always visible
     },
   ],
 };
 
 export function useNavigation() {
   const [dynamicItems, setDynamicItems] = useState<NavigationProps["addons"]>([]);
+  const { modules, loading, userRole } = useModuleVisibility();
 
   // Subscribe to navigation updates from addons
   useEffect(() => {
@@ -85,10 +129,35 @@ export function useNavigation() {
     };
   }, []);
 
+  // Filter secondary navigation based on module visibility
+  const filteredSecondary = useMemo(() => {
+    // If loading or superadmin, show all items
+    if (loading || userRole === "superadmin") {
+      return staticNavigation.secondary;
+    }
+
+    return (staticNavigation.secondary || []).filter((item) => {
+      // Items without moduleKey are always visible
+      if (!item.moduleKey) return true;
+
+      // Check module visibility
+      const moduleKeyMap: Record<string, keyof typeof modules> = {
+        privateEquity: "privateEquity",
+        accounting: "accounting",
+        shareholder: "shareholder",
+        reports: "reports",
+        admin: "admin",
+      };
+
+      const key = moduleKeyMap[item.moduleKey];
+      return key ? modules[key] : true;
+    });
+  }, [modules, loading, userRole]);
+
   // Combine static navigation items with addons grouped separately
   const navigation: NavigationProps = {
     primary: staticNavigation.primary,
-    secondary: staticNavigation.secondary,
+    secondary: filteredSecondary,
     addons: dynamicItems,
   };
 

@@ -1,0 +1,17 @@
+# Wealthfolio PostgreSQL Migrations
+
+This folder contains Diesel migrations for PostgreSQL/Supabase.
+
+**Note**: The actual migrations are managed via Supabase dashboard or CLI.
+The migration file `20250124000000_wealthfolio_tables.sql` is in the Orus project:
+`orus-reference/supabase/migrations/20250124000000_wealthfolio_tables.sql`
+
+For local development, you can use Diesel CLI to manage migrations:
+
+```bash
+# Set DATABASE_URL
+export DATABASE_URL="postgresql://postgres:password@localhost:5432/wealthfolio"
+
+# Run migrations
+diesel migration run
+```

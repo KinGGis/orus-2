@@ -1,4 +1,5 @@
 pub mod allocation;
+pub mod bond_coupons;
 pub mod holdings;
 pub mod income;
 pub mod net_worth;

@@ -96,6 +96,9 @@ pub struct HoldingInput {
     pub data_source: Option<String>,
     /// Asset kind (e.g., "INVESTMENT", "OTHER")
     pub asset_kind: Option<String>,
+    /// Instrument type (e.g., "EQUITY", "BOND", "CRYPTO", "OPTION", "OTHER").
+    /// When provided for a new asset, this overrides the default inference.
+    pub instrument_type: Option<String>,
 }
 
 /// Request body for saving manual holdings

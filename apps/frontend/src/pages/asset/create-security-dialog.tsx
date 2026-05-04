@@ -1,9 +1,11 @@
-import { getExchanges } from "@/adapters";
+import { getExchanges, getTaxonomy } from "@/adapters";
 import TickerSearchInput from "@/components/ticker-search";
 import { useSettingsContext } from "@/lib/settings-provider";
-import type { NewAsset, SymbolSearchResult } from "@/lib/types";
+import { QueryKeys } from "@/lib/query-keys";
+import type { NewAsset, SymbolSearchResult, TaxonomyCategory } from "@/lib/types";
+import { useTaxonomies } from "@/hooks/use-taxonomies";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { CurrencyInput, SearchableSelect } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import {
@@ -47,6 +49,7 @@ const INSTRUMENT_TYPE_OPTIONS = [
 const QUOTE_MODE_OPTIONS = [
   { value: "MANUAL", label: "Manual" },
   { value: "MARKET", label: "Market (auto-sync)" },
+  { value: "INTERNAL_YTM", label: "Internal YTM (bond model)" },
 ] as const;
 
 /** Map search result quoteType to our InstrumentType form values */
@@ -79,19 +82,69 @@ const createSecuritySchema = z.object({
   name: z.string().min(1, "Name is required").max(100, "Name must be 100 characters or less"),
   instrumentType: z.string().min(1, "Instrument type is required"),
   quoteCcy: z.string().min(1, "Currency is required"),
-  quoteMode: z.enum(["MANUAL", "MARKET"]),
+  quoteMode: z.enum(["MANUAL", "MARKET", "INTERNAL_YTM"]),
   instrumentExchangeMic: z.string().optional(),
+  country: z.string().optional(),
+  sector: z.string().optional(),
   notes: z.string().optional(),
 });
 
 type CreateSecurityFormValues = z.infer<typeof createSecuritySchema>;
+
+/** Classifications resolved from free-text country/sector inputs at submit time. */
+export interface ResolvedClassifications {
+  /** Selected category in the Regions taxonomy (best fuzzy match for the country input). */
+  region?: { taxonomyId: string; categoryId: string };
+  /** Selected category in the Industries (GICS) taxonomy (best fuzzy match for the sector input). */
+  sector?: { taxonomyId: string; categoryId: string };
+  /** When true, caller should auto-assign the default Bond classifications. */
+  autoBondClassify: boolean;
+}
+
+/** Normalize a string for fuzzy comparison: lowercase, strip diacritics & non-alphanum. */
+function normalizeForMatch(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Find the best matching category for a free-text query against a list of
+ * taxonomy categories. Returns `null` if the input is empty or no candidate
+ * looks plausible. Match priority:
+ *   1. exact normalized name or key
+ *   2. category name starts with the query
+ *   3. category name contains the query
+ */
+function findBestCategory(
+  query: string | undefined,
+  categories: TaxonomyCategory[],
+): TaxonomyCategory | null {
+  if (!query) return null;
+  const q = normalizeForMatch(query);
+  if (!q) return null;
+  const candidates = categories.map((c) => ({
+    cat: c,
+    name: normalizeForMatch(c.name),
+    key: normalizeForMatch(c.key ?? ""),
+  }));
+  const exact = candidates.find((c) => c.name === q || c.key === q);
+  if (exact) return exact.cat;
+  const startsWith = candidates.find((c) => c.name.startsWith(q));
+  if (startsWith) return startsWith.cat;
+  const contains = candidates.find((c) => c.name.includes(q) || q.includes(c.name));
+  if (contains) return contains.cat;
+  return null;
+}
 
 const normalizeMic = (mic?: string | null): string => mic?.trim().toUpperCase() ?? "";
 
 interface CreateSecurityDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (payload: NewAsset) => void;
+  onSubmit: (payload: NewAsset, classifications: ResolvedClassifications) => void;
   isPending?: boolean;
 }
 
@@ -119,6 +172,48 @@ export function CreateSecurityDialog({
     [exchanges],
   );
 
+  // Load taxonomies once to find the IDs for "Regions" and "Industries (GICS)".
+  const { data: taxonomies = [] } = useTaxonomies();
+  const regionsTaxonomy = useMemo(
+    () =>
+      taxonomies.find((t) => {
+        const n = t.name.toLowerCase();
+        return n === "regions" || n === "region" || n.includes("region");
+      }),
+    [taxonomies],
+  );
+  const sectorsTaxonomy = useMemo(
+    () =>
+      taxonomies.find((t) => {
+        const n = t.name.toLowerCase();
+        return n.includes("industr") || n.includes("sector") || n.includes("gics");
+      }),
+    [taxonomies],
+  );
+
+  // Lazy-load each target taxonomy's categories (only when its id is known).
+  const taxonomyDetailQueries = useQueries({
+    queries: [regionsTaxonomy?.id, sectorsTaxonomy?.id]
+      .filter((id): id is string => !!id)
+      .map((id) => ({
+        queryKey: QueryKeys.taxonomy(id),
+        queryFn: () => getTaxonomy(id),
+        staleTime: 5 * 60 * 1000,
+      })),
+  });
+  const regionCategories: TaxonomyCategory[] = useMemo(() => {
+    const q = taxonomyDetailQueries.find(
+      (r) => r.data?.taxonomy.id === regionsTaxonomy?.id,
+    );
+    return q?.data?.categories ?? [];
+  }, [taxonomyDetailQueries, regionsTaxonomy?.id]);
+  const sectorCategories: TaxonomyCategory[] = useMemo(() => {
+    const q = taxonomyDetailQueries.find(
+      (r) => r.data?.taxonomy.id === sectorsTaxonomy?.id,
+    );
+    return q?.data?.categories ?? [];
+  }, [taxonomyDetailQueries, sectorsTaxonomy?.id]);
+
   const form = useForm<CreateSecurityFormValues>({
     resolver: zodResolver(createSecuritySchema),
     defaultValues: {
@@ -128,6 +223,8 @@ export function CreateSecurityDialog({
       quoteCcy: defaultCurrency,
       quoteMode: "MANUAL",
       instrumentExchangeMic: "",
+      country: "",
+      sector: "",
       notes: "",
     },
   });
@@ -141,6 +238,8 @@ export function CreateSecurityDialog({
         quoteCcy: defaultCurrency,
         quoteMode: "MANUAL",
         instrumentExchangeMic: "",
+        country: "",
+        sector: "",
         notes: "",
       });
     }
@@ -183,7 +282,28 @@ export function CreateSecurityDialog({
       instrumentExchangeMic: values.instrumentExchangeMic || undefined,
       notes: values.notes || undefined,
     };
-    onSubmit(payload);
+
+    const regionCat = regionsTaxonomy
+      ? findBestCategory(values.country, regionCategories)
+      : null;
+    const sectorCat = sectorsTaxonomy
+      ? findBestCategory(values.sector, sectorCategories)
+      : null;
+
+    const classifications: ResolvedClassifications = {
+      region:
+        regionsTaxonomy && regionCat
+          ? { taxonomyId: regionsTaxonomy.id, categoryId: regionCat.id }
+          : undefined,
+      sector:
+        sectorsTaxonomy && sectorCat
+          ? { taxonomyId: sectorsTaxonomy.id, categoryId: sectorCat.id }
+          : undefined,
+      autoBondClassify:
+        values.instrumentType === "BOND" || values.quoteMode === "INTERNAL_YTM",
+    };
+
+    onSubmit(payload, classifications);
   };
 
   const handleDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -350,6 +470,69 @@ export function CreateSecurityDialog({
                 </FormItem>
               )}
             />
+
+            <div className="grid grid-cols-2 gap-4">
+              <FormField
+                control={form.control}
+                name="country"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      Country{" "}
+                      <span className="text-muted-foreground text-xs">(optional)</span>
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        list="create-security-country-list"
+                        placeholder="e.g., Switzerland"
+                        {...field}
+                        value={field.value ?? ""}
+                      />
+                    </FormControl>
+                    <datalist id="create-security-country-list">
+                      {regionCategories.map((c) => (
+                        <option key={c.id} value={c.name} />
+                      ))}
+                    </datalist>
+                    <p className="text-muted-foreground text-xs">
+                      Free text — best match in the Regions taxonomy is auto-selected.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="sector"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      Sector{" "}
+                      <span className="text-muted-foreground text-xs">(optional)</span>
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        list="create-security-sector-list"
+                        placeholder="e.g., Financials"
+                        {...field}
+                        value={field.value ?? ""}
+                      />
+                    </FormControl>
+                    <datalist id="create-security-sector-list">
+                      {sectorCategories.map((c) => (
+                        <option key={c.id} value={c.name} />
+                      ))}
+                    </datalist>
+                    <p className="text-muted-foreground text-xs">
+                      Free text — best match in the Industries (GICS) taxonomy is
+                      auto-selected.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
 
             <FormField
               control={form.control}

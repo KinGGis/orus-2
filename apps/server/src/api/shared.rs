@@ -161,6 +161,23 @@ pub async fn process_portfolio_job(
         tracing::debug!("Skipping market sync (MarketSyncMode::None)");
     }
 
+    // Materialize past coupons for INTERNAL_YTM bonds BEFORE snapshots are
+    // recalculated, so newly inserted INTEREST activities are picked up by
+    // the same recalculation pass and contribute to realized P&L.
+    let today = chrono::Utc::now().date_naive();
+    match wealthfolio_core::portfolio::bond_coupons::materialize_bond_coupons(
+        state.asset_service.clone(),
+        state.activity_service.clone(),
+        state.snapshot_repository.clone(),
+        today,
+    )
+    .await
+    {
+        Ok(0) => tracing::debug!("bond_coupons: no new coupons to materialize"),
+        Ok(n) => tracing::info!("bond_coupons: materialized {} new INTEREST activities", n),
+        Err(err) => tracing::warn!("bond_coupons: materialization failed: {}", err),
+    }
+
     event_bus.publish(ServerEvent::new(PORTFOLIO_UPDATE_START));
 
     // For TOTAL portfolio calculation, use non-archived accounts (ignores is_active)

@@ -37,6 +37,8 @@ export function tryParseDate(dateStr: string): Date | null {
 
     // ISO and Technical Formats
     "yyyy-MM-dd", // "2024-05-01" - ISO 8601
+    "yyyy-MM-dd, HH:mm:ss", // "2024-05-01, 14:30:00" - IBKR style
+    "yyyy-MM-dd, HH:mm", // "2024-05-01, 14:30" - IBKR style (no seconds)
     "yyyyMMdd", // "20240501" - Compact ISO
     "yyyy/MM/dd", // "2024/05/01" - Modified ISO
     "yyyy.MM.dd", // "2024.05.01" - Modified ISO
@@ -93,8 +95,11 @@ export function tryParseDate(dateStr: string): Date | null {
   }
 
   // Try Unix timestamp (in seconds or milliseconds)
-  const num = parseInt(cleaned);
-  if (!isNaN(num)) {
+  // Only treat input as Unix timestamp when it is fully numeric.
+  // This avoids parsing values like "2026-04-10, 13:33:00" as 2026 -> 1970-01-01.
+  const isPureNumeric = /^[+-]?\d+$/.test(cleaned);
+  const num = isPureNumeric ? Number(cleaned) : Number.NaN;
+  if (Number.isFinite(num)) {
     const timestampDate = new Date(num > 1000000000000 ? num : num * 1000);
     if (isValid(timestampDate) && isDateInRange(timestampDate)) {
       return timestampDate;

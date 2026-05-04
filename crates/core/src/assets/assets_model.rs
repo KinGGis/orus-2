@@ -61,6 +61,8 @@ pub enum QuoteMode {
     #[default]
     Market, // Priced via market data providers
     Manual, // User-entered quotes only
+    #[serde(rename = "INTERNAL_YTM")]
+    InternalYtm, // Daily dirty-price calculation from stored YTM parameters
 }
 
 impl QuoteMode {
@@ -69,7 +71,13 @@ impl QuoteMode {
         match self {
             QuoteMode::Market => "MARKET",
             QuoteMode::Manual => "MANUAL",
+            QuoteMode::InternalYtm => "INTERNAL_YTM",
         }
+    }
+
+    /// Returns true if this mode requires automated calculation (not user entry, not market fetch).
+    pub fn is_internal_calc(&self) -> bool {
+        matches!(self, QuoteMode::InternalYtm)
     }
 }
 
@@ -121,6 +129,119 @@ pub struct BondSpec {
     pub face_value: Option<Decimal>,  // Par value per bond (typically 1000.0)
     pub coupon_frequency: Option<String>, // ANNUAL, SEMI_ANNUAL, QUARTERLY, MONTHLY
     pub isin: Option<String>,
+
+    // ── Internal YTM pricing fields (quote_mode = INTERNAL_YTM) ────────────
+    /// YTM source: "FIXED", "CURVE_PLUS_SPREAD", "MANUAL_SERIES"
+    pub ytm_source: Option<String>,
+    /// Annual YTM as decimal (e.g. 0.0325 for 3.25%) — used when ytm_source = FIXED
+    pub ytm_fixed_value: Option<Decimal>,
+    /// Z-spread in basis points — used when ytm_source = CURVE_PLUS_SPREAD
+    pub ytm_spread_bps: Option<Decimal>,
+    /// Day-count convention: "ACT/ACT", "30/360", "ACT/365", "ACT/360"
+    pub day_count_convention: Option<String>,
+    /// Settlement delay in business days (T+N), default 1
+    pub settlement_days: Option<i32>,
+    /// Ex-coupon days: number of days before coupon payment where accrued resets to 0
+    pub ex_coupon_days: Option<i32>,
+    /// Whether to return dirty price (clean + accrued) or clean price: "DIRTY", "CLEAN"
+    pub pricing_method: Option<String>,
+    /// Coupon payment dates as comma-separated ISO dates: "2026-06-01,2026-12-01,2027-06-01"
+    /// May be left empty when `first_coupon_date` is set; the schedule is then derived
+    /// at runtime from (first_coupon_date, coupon_frequency, maturity_date).
+    pub coupon_schedule: Option<String>,
+    /// Date of the first coupon payment after issuance / settlement. Used to
+    /// auto-generate `coupon_schedule` when none is provided.
+    pub first_coupon_date: Option<chrono::NaiveDate>,
+}
+
+impl BondSpec {
+    /// Parse the coupon_schedule string into a sorted list of NaiveDates.
+    ///
+    /// If `coupon_schedule` is empty/missing but `first_coupon_date`,
+    /// `coupon_frequency` and `maturity_date` are set, the schedule is
+    /// derived deterministically.
+    pub fn parse_coupon_schedule(&self) -> Vec<chrono::NaiveDate> {
+        let parsed: Vec<chrono::NaiveDate> = self
+            .coupon_schedule
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|s| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok())
+            .collect();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+        self.derive_coupon_schedule().unwrap_or_default()
+    }
+
+    /// Derive a coupon schedule from (first_coupon_date, coupon_frequency, maturity_date).
+    /// Returns `None` if any required field is missing or the frequency is unknown.
+    pub fn derive_coupon_schedule(&self) -> Option<Vec<chrono::NaiveDate>> {
+        let first = self.first_coupon_date?;
+        let maturity = self.maturity_date?;
+        let months = months_per_period(self.coupon_frequency.as_deref()?)?;
+        let mut out = Vec::new();
+        let mut current = first;
+        let mut i: u32 = 0;
+        while current <= maturity {
+            out.push(current);
+            i += 1;
+            current = add_months(first, i.saturating_mul(months))?;
+            // Safety guard against runaway loops (e.g. 100 years of monthly coupons = 1200)
+            if out.len() > 2000 {
+                break;
+            }
+        }
+        // Ensure maturity date is included as a coupon-payment anchor if not already
+        if out.last() != Some(&maturity) {
+            // Only add if maturity occurs strictly after the last derived date
+            if out.last().map(|&d| d < maturity).unwrap_or(true) {
+                out.push(maturity);
+            }
+        }
+        Some(out)
+    }
+
+    /// Returns true if this spec has enough data to run internal YTM pricing.
+    pub fn has_ytm_params(&self) -> bool {
+        self.maturity_date.is_some()
+            && self.ytm_source.is_some()
+            && !self.parse_coupon_schedule().is_empty()
+    }
+}
+
+/// Map a coupon frequency string to the number of months between payments.
+fn months_per_period(freq: &str) -> Option<u32> {
+    match freq.to_ascii_uppercase().as_str() {
+        "ANNUAL" => Some(12),
+        "SEMI_ANNUAL" => Some(6),
+        "QUARTERLY" => Some(3),
+        "MONTHLY" => Some(1),
+        _ => None,
+    }
+}
+
+/// Add `months` months to `date`, clamping the day to the last day of the resulting month.
+fn add_months(date: chrono::NaiveDate, months: u32) -> Option<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let total = date.year() as i32 * 12 + (date.month() as i32 - 1) + months as i32;
+    let year = total.div_euclid(12);
+    let month = (total.rem_euclid(12) + 1) as u32;
+    // Clamp day to last day of target month
+    let last_day = last_day_of_month(year, month)?;
+    let day = date.day().min(last_day);
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first_of_next = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    let last = first_of_next.pred_opt()?;
+    Some(chrono::Datelike::day(&last))
 }
 
 /// Builds structured asset metadata (OptionSpec, BondSpec) for the given instrument type.
@@ -344,9 +465,14 @@ impl Asset {
         !matches!(self.kind, AssetKind::Fx)
     }
 
-    /// Check if this asset needs pricing
+    /// Check if this asset needs pricing via a market data provider.
     pub fn needs_pricing(&self) -> bool {
         self.quote_mode == QuoteMode::Market
+    }
+
+    /// Check if this asset needs internal YTM-based daily price calculation.
+    pub fn needs_internal_calc(&self) -> bool {
+        self.quote_mode == QuoteMode::InternalYtm
     }
 
     /// Check if this asset is an alternative asset type.

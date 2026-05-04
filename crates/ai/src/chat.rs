@@ -306,6 +306,10 @@ impl<E: AiEnvironment + 'static> ChatService<E> {
             "record_activity".to_string(),
             "record_activities".to_string(),
             "import_csv".to_string(),
+            "update_activity".to_string(),
+            "delete_activity".to_string(),
+            "get_risk_analysis".to_string(),
+            "get_portfolio_summary".to_string(),
         ]
     }
 
@@ -598,6 +602,21 @@ async fn spawn_chat_stream<E: AiEnvironment + 'static>(
             }
             if is_allowed("import_csv") {
                 allowed_tools.push(Box::new(tool_set.import_csv));
+            }
+            if is_allowed("update_activity") {
+                allowed_tools.push(Box::new(tool_set.update_activity));
+            }
+            if is_allowed("delete_activity") {
+                allowed_tools.push(Box::new(tool_set.delete_activity));
+            }
+            if is_allowed("get_risk_analysis") {
+                allowed_tools.push(Box::new(tool_set.risk_analysis));
+            }
+            if is_allowed("get_portfolio_summary") {
+                allowed_tools.push(Box::new(tool_set.portfolio_summary));
+            }
+            if is_allowed("read_file") {
+                allowed_tools.push(Box::new(tool_set.read_file));
             }
 
             let mut builder = $client

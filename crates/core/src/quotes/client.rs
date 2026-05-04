@@ -39,10 +39,10 @@ use crate::secrets::SecretStore;
 use wealthfolio_market_data::{
     mic_to_currency, mic_to_exchange_name, yahoo_exchange_to_mic, yahoo_suffix_to_mic,
     AlphaVantageProvider, AssetProfile as MarketAssetProfile, BoerseFrankfurtProvider,
-    BondQuoteMetadata, FinnhubProvider, MarketDataAppProvider, MetalPriceApiProvider,
-    OpenFigiProvider, ProviderId, ProviderRegistry, Quote as MarketQuote, QuoteContext,
-    ResolverChain, SearchResult as MarketSearchResult, SplitEvent, UsTreasuryCalcProvider,
-    YahooProvider,
+    BondQuoteMetadata, FinnhubProvider, InternalBondPricingProvider, MarketDataAppProvider,
+    MetalPriceApiProvider, OpenFigiProvider, ProviderId, ProviderRegistry,
+    Quote as MarketQuote, QuoteContext, ResolverChain, SearchResult as MarketSearchResult,
+    SplitEvent, UsTreasuryCalcProvider, YahooProvider,
 };
 
 /// Market data error types.
@@ -145,6 +145,13 @@ impl MarketDataClient {
         // This ensures bond ISIN/FIGI lookup works without users needing to enable it in settings.
         if !providers.iter().any(|p| p.id() == DATA_SOURCE_OPENFIGI) {
             providers.push(Arc::new(OpenFigiProvider::new()));
+        }
+
+        // Always register the internal bond pricing provider.
+        // It is CPU-only (no network), handles only bonds with ytm_params set,
+        // and has the highest priority (2) so it runs before external providers.
+        if !providers.iter().any(|p| p.id() == DATA_SOURCE_INTERNAL_BOND_MODEL) {
+            providers.push(Arc::new(InternalBondPricingProvider));
         }
 
         if providers.is_empty() {
@@ -372,12 +379,27 @@ impl MarketDataClient {
             _ => None,
         };
 
+        // Build YTM pricing params for INTERNAL_YTM mode.
+        let bond_ytm_params = if asset.quote_mode == crate::assets::QuoteMode::InternalYtm {
+            asset.bond_spec().and_then(|spec| {
+                build_bond_ytm_params(&spec)
+                    .map_err(|e| {
+                        warn!("INTERNAL_YTM: could not build YTM params for {}: {}", asset.id, e);
+                        e
+                    })
+                    .ok()
+            })
+        } else {
+            None
+        };
+
         Ok(QuoteContext {
             instrument,
             overrides,
             currency_hint,
             preferred_provider,
             bond_metadata,
+            bond_ytm_params,
         })
     }
 
@@ -391,6 +413,7 @@ impl MarketDataClient {
             DATA_SOURCE_FINNHUB => DataSource::Finnhub,
             DATA_SOURCE_US_TREASURY_CALC => DataSource::UsTreasuryCalc,
             DATA_SOURCE_BOERSE_FRANKFURT => DataSource::BoerseFrankfurt,
+            DATA_SOURCE_INTERNAL_BOND_MODEL => DataSource::InternalBondModel,
             DATA_SOURCE_MANUAL => DataSource::Manual,
             _ => DataSource::Yahoo, // Default fallback
         };
@@ -694,6 +717,72 @@ impl MarketDataClient {
             week_52_low: profile.week_52_low,
         }
     }
+}
+
+/// Convert a `BondSpec` (from `Asset.metadata`) into market-data `BondYtmParams`.
+///
+/// Returns an error string if required fields are missing or invalid.
+fn build_bond_ytm_params(
+    spec: &crate::assets::BondSpec,
+) -> std::result::Result<wealthfolio_market_data::models::BondYtmParams, String> {
+    use wealthfolio_market_data::models::{
+        BondYtmParams, DayCountConvention, PricingMethod, YtmSource,
+    };
+
+    let ytm_source_str = spec
+        .ytm_source
+        .as_deref()
+        .ok_or("ytm_source is required for INTERNAL_YTM mode")?;
+
+    let ytm_source = match ytm_source_str {
+        "FIXED" => {
+            let ytm = spec
+                .ytm_fixed_value
+                .ok_or("ytm_fixed_value is required when ytm_source = FIXED")?;
+            YtmSource::Fixed(ytm)
+        }
+        "CURVE_PLUS_SPREAD" => {
+            let bps = spec
+                .ytm_spread_bps
+                .ok_or("ytm_spread_bps is required when ytm_source = CURVE_PLUS_SPREAD")?;
+            YtmSource::CurvePlusSpread { spread_bps: bps }
+        }
+        other => return Err(format!("Unknown ytm_source value: {}", other)),
+    };
+
+    let day_count = DayCountConvention::from_str(
+        spec.day_count_convention.as_deref().unwrap_or("ACT/ACT"),
+    )
+    .ok_or_else(|| {
+        format!(
+            "Unknown day_count_convention: {}",
+            spec.day_count_convention.as_deref().unwrap_or("(none)")
+        )
+    })?;
+
+    let pricing_method =
+        PricingMethod::from_str(spec.pricing_method.as_deref().unwrap_or("DIRTY"))
+            .ok_or_else(|| {
+                format!(
+                    "Unknown pricing_method: {}",
+                    spec.pricing_method.as_deref().unwrap_or("(none)")
+                )
+            })?;
+
+    let mut coupon_schedule = spec.parse_coupon_schedule();
+    if coupon_schedule.is_empty() {
+        return Err("coupon_schedule must have at least one date".to_string());
+    }
+    coupon_schedule.sort();
+
+    Ok(BondYtmParams {
+        ytm_source,
+        day_count,
+        settlement_days: spec.settlement_days.unwrap_or(1),
+        ex_coupon_days: spec.ex_coupon_days.unwrap_or(0),
+        pricing_method,
+        coupon_schedule,
+    })
 }
 
 #[cfg(test)]

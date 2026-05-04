@@ -27,7 +27,7 @@ const assetFormSchema = z.object({
   symbol: z.string().min(1),
   name: z.string().optional(),
   currency: z.string().min(1),
-  quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]),
+  quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL, QuoteMode.INTERNAL_YTM]),
   notes: z.string().optional(),
 });
 
@@ -36,6 +36,7 @@ export type AssetFormValues = z.infer<typeof assetFormSchema>;
 const quoteModeOptions: ResponsiveSelectOption[] = [
   { label: "Market Data", value: QuoteMode.MARKET },
   { label: "Manual", value: QuoteMode.MANUAL },
+  { label: "Internal YTM", value: QuoteMode.INTERNAL_YTM },
 ];
 
 interface AssetFormProps {
@@ -61,7 +62,12 @@ export function AssetForm({ asset, onSubmit, onCancel, isSaving }: AssetFormProp
     symbol: asset.id,
     name: asset.name ?? "",
     currency: asset.quoteCcy,
-    quoteMode: asset.quoteMode === "MANUAL" ? QuoteMode.MANUAL : QuoteMode.MARKET,
+    quoteMode:
+      asset.quoteMode === "MANUAL"
+        ? QuoteMode.MANUAL
+        : asset.quoteMode === "INTERNAL_YTM"
+          ? QuoteMode.INTERNAL_YTM
+          : QuoteMode.MARKET,
     notes: asset.notes ?? "",
   };
 

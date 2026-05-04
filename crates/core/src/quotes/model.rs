@@ -20,6 +20,7 @@ pub const DATA_SOURCE_METAL_PRICE_API: &str = "METAL_PRICE_API";
 pub const DATA_SOURCE_FINNHUB: &str = "FINNHUB";
 pub const DATA_SOURCE_US_TREASURY_CALC: &str = "US_TREASURY_CALC";
 pub const DATA_SOURCE_BOERSE_FRANKFURT: &str = "BOERSE_FRANKFURT";
+pub const DATA_SOURCE_INTERNAL_BOND_MODEL: &str = "INTERNAL_BOND_MODEL";
 
 // =============================================================================
 // Data Source
@@ -51,6 +52,9 @@ pub enum DataSource {
     /// Börse Frankfurt - European bond pricing
     #[serde(rename = "BOERSE_FRANKFURT")]
     BoerseFrankfurt,
+    /// Internal YTM-based dirty price calculation (no external data source)
+    #[serde(rename = "INTERNAL_BOND_MODEL")]
+    InternalBondModel,
     /// Manual entry by user
     #[default]
     Manual,
@@ -67,6 +71,7 @@ impl DataSource {
             DataSource::Finnhub => DATA_SOURCE_FINNHUB,
             DataSource::UsTreasuryCalc => DATA_SOURCE_US_TREASURY_CALC,
             DataSource::BoerseFrankfurt => DATA_SOURCE_BOERSE_FRANKFURT,
+            DataSource::InternalBondModel => DATA_SOURCE_INTERNAL_BOND_MODEL,
             DataSource::Manual => DATA_SOURCE_MANUAL,
         }
     }
@@ -88,6 +93,7 @@ impl From<&str> for DataSource {
             DATA_SOURCE_FINNHUB => DataSource::Finnhub,
             DATA_SOURCE_US_TREASURY_CALC => DataSource::UsTreasuryCalc,
             DATA_SOURCE_BOERSE_FRANKFURT => DataSource::BoerseFrankfurt,
+            DATA_SOURCE_INTERNAL_BOND_MODEL => DataSource::InternalBondModel,
             _ => DataSource::Manual,
         }
     }

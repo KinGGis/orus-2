@@ -196,9 +196,14 @@ impl PerformanceService {
             if prev_point.total_value.is_sign_negative()
                 || curr_point.total_value.is_sign_negative()
             {
-                return Err(errors::Error::Validation(ValidationError::InvalidInput(
-                    "Negative total value found in valuation history records".to_string(),
-                )));
+                // Negative total value can legitimately occur in margin accounts or when
+                // cash withdrawals exceed investment value at a historical point.
+                // Skip this period rather than aborting the entire calculation.
+                warn!(
+                    "Negative total value detected in valuation history (prev={}, curr={}). Skipping period.",
+                    prev_point.total_value, curr_point.total_value
+                );
+                continue;
             }
 
             let prev_total_value = prev_point.total_value;

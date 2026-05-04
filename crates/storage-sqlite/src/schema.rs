@@ -389,6 +389,69 @@ diesel::table! {
 }
 
 diesel::table! {
+    revolut_accounts (id) {
+        id -> Text,
+        revolut_account_id -> Text,
+        name -> Text,
+        currency -> Text,
+        balance -> Text,
+        state -> Text,
+        wf_account_id -> Nullable<Text>,
+        last_synced_at -> Nullable<Text>,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    revolut_auth_tokens (id) {
+        id -> Text,
+        access_token -> Text,
+        refresh_token -> Nullable<Text>,
+        token_type -> Text,
+        scope -> Nullable<Text>,
+        expires_at -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    revolut_sync_log (id) {
+        id -> Text,
+        sync_type -> Text,
+        status -> Text,
+        accounts_synced -> Nullable<Integer>,
+        transactions_synced -> Nullable<Integer>,
+        error_message -> Nullable<Text>,
+        started_at -> Text,
+        completed_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    revolut_transactions (id) {
+        id -> Text,
+        revolut_transaction_id -> Text,
+        revolut_account_id -> Text,
+        #[sql_name = "type"]
+        tx_type -> Text,
+        state -> Text,
+        amount -> Text,
+        currency -> Text,
+        description -> Nullable<Text>,
+        merchant_name -> Nullable<Text>,
+        merchant_category -> Nullable<Text>,
+        reference -> Nullable<Text>,
+        completed_at -> Nullable<Text>,
+        created_at -> Text,
+        balance_after -> Nullable<Text>,
+        wf_activity_id -> Nullable<Text>,
+        synced_to_activities -> Integer,
+    }
+}
+
+diesel::table! {
     taxonomies (id) {
         id -> Text,
         name -> Text,
@@ -417,6 +480,30 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    user_roles (id) {
+        id -> Text,
+        user_id -> Text,
+        role -> Text,
+        created_at -> Text,
+        created_by -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    users (id) {
+        id -> Text,
+        email -> Text,
+        full_name -> Nullable<Text>,
+        avatar_url -> Nullable<Text>,
+        preferred_currency -> Nullable<Text>,
+        is_active -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+        last_login_at -> Nullable<Text>,
+    }
+}
+
 diesel::joinable!(accounts -> platforms (platform_id));
 diesel::joinable!(activities -> accounts (account_id));
 diesel::joinable!(activities -> assets (asset_id));
@@ -430,7 +517,10 @@ diesel::joinable!(goals_allocation -> accounts (account_id));
 diesel::joinable!(goals_allocation -> goals (goal_id));
 diesel::joinable!(import_runs -> accounts (account_id));
 diesel::joinable!(quotes -> assets (asset_id));
+diesel::joinable!(revolut_accounts -> accounts (wf_account_id));
+diesel::joinable!(revolut_transactions -> activities (wf_activity_id));
 diesel::joinable!(taxonomy_categories -> taxonomies (taxonomy_id));
+diesel::joinable!(user_roles -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     accounts,
@@ -454,6 +544,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     platforms,
     quote_sync_state,
     quotes,
+    revolut_accounts,
+    revolut_auth_tokens,
+    revolut_sync_log,
+    revolut_transactions,
     sync_applied_events,
     sync_cursor,
     sync_device_config,
@@ -463,4 +557,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     sync_table_state,
     taxonomies,
     taxonomy_categories,
+    user_roles,
+    users,
 );

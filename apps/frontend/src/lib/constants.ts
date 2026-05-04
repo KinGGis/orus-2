@@ -92,12 +92,17 @@ export const dataSourceSchema = z.enum([DataSource.YAHOO, DataSource.MANUAL]);
 export const QuoteMode = {
   MARKET: "MARKET", // Auto-fetch prices from market data providers
   MANUAL: "MANUAL", // User manages prices manually
+  INTERNAL_YTM: "INTERNAL_YTM", // Internal bond pricing model (YTM-driven)
 } as const;
 
 export type QuoteMode = (typeof QuoteMode)[keyof typeof QuoteMode];
 
 // Zod schema for quote mode validation
-export const quoteModeSchema = z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]);
+export const quoteModeSchema = z.enum([
+  QuoteMode.MARKET,
+  QuoteMode.MANUAL,
+  QuoteMode.INTERNAL_YTM,
+]);
 
 // Legacy alias for backward compatibility during migration
 export const PricingMode = QuoteMode;

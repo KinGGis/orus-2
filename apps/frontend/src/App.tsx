@@ -2,6 +2,7 @@ import { isWeb } from "@/adapters";
 import { AuthGate, AuthProvider } from "@/context/auth-context";
 import { WealthfolioConnectProvider } from "@/features/wealthfolio-connect";
 import { DeviceSyncProvider } from "@/features/devices-sync";
+import { OrusAuthProvider } from "@/features/orus-integration/orus-auth-context";
 import { SettingsProvider } from "@/lib/settings-provider";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@wealthfolio/ui";
@@ -40,15 +41,17 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <WealthfolioConnectProvider>
-          <DeviceSyncProvider>
-            <PrivacyProvider>
-              <SettingsProvider>
-                <TooltipProvider>{routedContent}</TooltipProvider>
-              </SettingsProvider>
-            </PrivacyProvider>
-          </DeviceSyncProvider>
-        </WealthfolioConnectProvider>
+        <OrusAuthProvider>
+          <WealthfolioConnectProvider>
+            <DeviceSyncProvider>
+              <PrivacyProvider>
+                <SettingsProvider>
+                  <TooltipProvider>{routedContent}</TooltipProvider>
+                </SettingsProvider>
+              </PrivacyProvider>
+            </DeviceSyncProvider>
+          </WealthfolioConnectProvider>
+        </OrusAuthProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

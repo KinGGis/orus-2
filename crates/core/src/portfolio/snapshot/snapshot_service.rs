@@ -1651,6 +1651,20 @@ impl SnapshotServiceTrait for SnapshotService {
         let today = self.user_today();
         // The date passed to get_latest_snapshot_before_date is exclusive, so use tomorrow to include today.
         let tomorrow = today.succ_opt().unwrap_or(today);
+
+        // Prefer CALCULATED snapshots for holdings so gain/loss uses activity-derived cost basis.
+        // Imported/manual snapshots can legitimately have positions without lot/cost basis details.
+        let snapshots_until_today =
+            self.snapshot_repository
+                .get_snapshots_by_account(account_id, None, Some(tomorrow))?;
+        if let Some(latest_calculated) = snapshots_until_today
+            .iter()
+            .rev()
+            .find(|snapshot| snapshot.source == SnapshotSource::Calculated)
+        {
+            return Ok(Some(latest_calculated.clone()));
+        }
+
         match self
             .snapshot_repository
             .get_latest_snapshot_before_date(account_id, tomorrow)?

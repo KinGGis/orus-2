@@ -25,6 +25,7 @@ mod traits;
 pub mod alpha_vantage;
 pub mod boerse_frankfurt;
 pub mod finnhub;
+pub mod internal_bond_model;
 pub mod marketdata_app;
 pub mod metal_price_api;
 pub mod openfigi;
@@ -33,4 +34,5 @@ pub mod yahoo;
 
 // Re-exports
 pub use capabilities::{ProviderCapabilities, RateLimit};
+pub use internal_bond_model::InternalBondPricingProvider;
 pub use traits::MarketDataProvider;

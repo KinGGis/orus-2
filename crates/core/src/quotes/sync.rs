@@ -447,8 +447,9 @@ where
     /// Get the reason why an asset should be skipped, if any.
     /// Returns None if the asset should be synced.
     fn get_skip_reason(&self, asset: &Asset) -> Option<AssetSkipReason> {
-        // Only sync market-priced assets (including FX rates for currency conversion)
-        if asset.quote_mode != QuoteMode::Market {
+        // Only sync market-priced assets and INTERNAL_YTM bonds
+        // (including FX rates for currency conversion)
+        if asset.quote_mode != QuoteMode::Market && !asset.quote_mode.is_internal_calc() {
             return Some(AssetSkipReason::ManualPricing);
         }
 
@@ -1553,9 +1554,9 @@ where
 
             self.sync_state_store.upsert(&state).await?;
         } else {
-            // Check if asset should be synced (only market-priced assets)
-            if let Ok(asset) = self.asset_repo.get_by_id(symbol) {
-                if asset.quote_mode != QuoteMode::Market {
+// Check if asset should be synced (market-priced or INTERNAL_YTM)
+                if let Ok(asset) = self.asset_repo.get_by_id(symbol) {
+                if asset.quote_mode != QuoteMode::Market && !asset.quote_mode.is_internal_calc() {
                     return Ok(());
                 }
 

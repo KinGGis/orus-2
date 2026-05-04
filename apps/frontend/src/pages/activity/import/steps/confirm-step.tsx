@@ -12,8 +12,8 @@ import {
 } from "../context";
 import { useActivityImportMutations } from "../hooks/use-activity-import-mutations";
 import { ImportAlert } from "../components/import-alert";
-import type { ActivityImport } from "@/lib/types";
-import { saveAccountImportMapping, logger } from "@/adapters";
+import type { ActivityImport, ImportActivitiesResult } from "@/lib/types";
+import { checkActivitiesImport, saveAccountImportMapping, logger } from "@/adapters";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -128,6 +128,68 @@ function draftToActivityImport(draft: DraftActivity): ActivityImport {
   };
 }
 
+function buildImportFailureMessage(result: ImportActivitiesResult): string {
+  const failures = result.activities
+    .filter((activity) => {
+      const errors = activity.errors || {};
+      return !activity.isValid || Object.keys(errors).length > 0;
+    })
+    .flatMap((activity) => {
+      const line = activity.lineNumber ?? -1;
+      const errors = activity.errors || {};
+      return Object.entries(errors).flatMap(([field, messages]) =>
+        (messages || []).map((message) => ({ line, field, message })),
+      );
+    });
+
+  if (failures.length === 0) {
+    return "Import failed during final validation. Please review rows in Review step and retry.";
+  }
+
+  const preview = failures
+    .slice(0, 5)
+    .map((failure) =>
+      failure.line > 0
+        ? `Line ${failure.line} (${failure.field}): ${failure.message}`
+        : `${failure.field}: ${failure.message}`,
+    )
+    .join(" | ");
+
+  const extraCount = failures.length - 5;
+  return extraCount > 0 ? `${preview} | +${extraCount} more issue(s)` : preview;
+}
+
+function buildActivityFailureMessage(activities: ActivityImport[]): string {
+  const failures = activities
+    .filter((activity) => {
+      const errors = activity.errors || {};
+      return !activity.isValid || Object.keys(errors).length > 0;
+    })
+    .flatMap((activity) => {
+      const line = activity.lineNumber ?? -1;
+      const errors = activity.errors || {};
+      return Object.entries(errors).flatMap(([field, messages]) =>
+        (messages || []).map((message) => ({ line, field, message })),
+      );
+    });
+
+  if (failures.length === 0) {
+    return "Import failed during final validation. Please review rows in Review step and retry.";
+  }
+
+  const preview = failures
+    .slice(0, 5)
+    .map((failure) =>
+      failure.line > 0
+        ? `Line ${failure.line} (${failure.field}): ${failure.message}`
+        : `${failure.field}: ${failure.message}`,
+    )
+    .join(" | ");
+
+  const extraCount = failures.length - 5;
+  return extraCount > 0 ? `${preview} | +${extraCount} more issue(s)` : preview;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,6 +267,7 @@ export function ConfirmStep() {
             errors: 0,
           },
           importRunId: result.importRunId,
+          errorMessage: result.summary.success ? undefined : buildImportFailureMessage(result),
         }),
       );
       dispatch(nextStep());
@@ -221,17 +284,49 @@ export function ConfirmStep() {
   const skippedTotal = summary.skipped + summary.errors;
 
   const handleImport = () => {
+    void (async () => {
     // Filter only valid/warning activities for import
-    const activitiesToImport = state.draftActivities
-      .filter((d) => d.status === "valid" || d.status === "warning")
-      .map(draftToActivityImport);
+      const activitiesToImport = state.draftActivities
+        .filter((d) => d.status === "valid" || d.status === "warning")
+        .map(draftToActivityImport);
 
-    if (activitiesToImport.length === 0) {
-      setImportError("No valid activities to import");
-      return;
-    }
+      if (activitiesToImport.length === 0) {
+        setImportError("No valid activities to import");
+        return;
+      }
 
-    confirmImportMutation.mutate({ activities: activitiesToImport });
+      setImportError(null);
+
+      try {
+        const checkedActivities = await checkActivitiesImport({
+          accountId: state.accountId,
+          activities: activitiesToImport.map((activity) => ({
+            ...activity,
+            isDraft: true,
+          })),
+        });
+
+        const failedPrecheck = checkedActivities.some((activity) => {
+          const errors = activity.errors || {};
+          return !activity.isValid || Object.keys(errors).length > 0;
+        });
+
+        if (failedPrecheck) {
+          setImportError(buildActivityFailureMessage(checkedActivities));
+          return;
+        }
+
+        confirmImportMutation.mutate({
+          activities: checkedActivities.map((activity) => ({
+            ...activity,
+            isDraft: false,
+          })),
+        });
+      } catch (error) {
+        logger.error(`Pre-import validation failed: ${String(error)}`);
+        setImportError("Unable to validate activities before import. Please try again.");
+      }
+    })();
   };
 
   const handleBack = () => {

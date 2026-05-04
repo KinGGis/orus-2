@@ -47,6 +47,8 @@ interface EditableHolding {
   dataSource?: string;
   /** Asset kind (e.g., "INVESTMENT", "OTHER") */
   assetKind?: string;
+  /** Instrument type (e.g., "BOND", "EQUITY", "CRYPTO", "OPTION", "OTHER") */
+  instrumentType?: string;
   isNew?: boolean;
 }
 
@@ -224,6 +226,7 @@ export const HoldingsEditMode = ({
         exchangeMic: searchResult.exchangeMic,
         dataSource: searchResult.dataSource,
         assetKind: searchResult.assetKind,
+        instrumentType: searchResult.quoteType,
         isNew: true,
       };
       pendingHoldingSharesFocusAssetIdRef.current = assetId;
@@ -300,6 +303,7 @@ export const HoldingsEditMode = ({
           name: h.isNew ? h.name : undefined,
           dataSource: h.isNew ? h.dataSource : undefined,
           assetKind: h.isNew ? h.assetKind : undefined,
+          instrumentType: h.isNew ? h.instrumentType : undefined,
         }));
       const cashBalancesInput: Record<string, string> = {};
       for (const cash of cashBalances) {

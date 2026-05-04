@@ -37,6 +37,29 @@ import MarketDataImportPage from "./pages/settings/market-data/market-data-impor
 import MarketDataSettingsPage from "./pages/settings/market-data/market-data-settings";
 import TaxonomiesPage from "./pages/settings/taxonomies/taxonomies-page";
 import ConnectSettingsPage from "./pages/settings/wealthfolio-connect/connect-settings-page";
+import RevolutCallbackPage from "./pages/settings/revolut/revolut-callback-page";
+import RevolutSettingsPage from "./pages/settings/revolut/revolut-settings-page";
+import { SnapTradeCallbackPage, SnapTradeSettingsPage } from "./pages/settings/snaptrade";
+// Settings Account Pages
+import { AccountPage as SettingsAccountPage, ProfilePage as SettingsProfilePage, PasswordPage as SettingsPasswordPage } from "./pages/settings/account";
+// Orus Integration Pages
+import PrivateEquityPage from "./pages/orus/private-equity/private-equity-page";
+import PESimulationPage from "./pages/orus/private-equity/pe-simulation-page";
+import AccountingPage from "./pages/orus/accounting/accounting-page";
+import ShareholderPage from "./pages/orus/shareholder/shareholder-page";
+import OrusSettingsPage from "./pages/settings/orus/orus-settings-page";
+import ReportsPage from "./pages/orus/reports/reports-page";
+import ReportsConfigPage from "./pages/orus/reports/reports-config-page";
+import AdminPage from "./pages/orus/administration/admin-page";
+// Authentication Pages (global - reusing Orus auth components)
+import {
+  OrusLoginPage as LoginPage,
+  OrusSignupPage as SignupPage,
+  OrusForgotPasswordPage as ForgotPasswordPage,
+  OrusResetPasswordPage as ResetPasswordPage,
+  OrusAuthCallbackPage as AppAuthCallbackPage,
+} from "./pages/orus/auth";
+import { OrusProtectedRoute } from "./features/orus-integration/orus-auth-context";
 
 export function AppRoutes() {
   const [dynamicRoutes, setDynamicRoutes] = useState<
@@ -68,6 +91,15 @@ export function AppRoutes() {
 
         {/* Auth callback - No layout needed */}
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+        <Route path="/revolut/callback" element={<RevolutCallbackPage />} />
+        <Route path="/snaptrade/callback" element={<SnapTradeCallbackPage />} />
+
+        {/* Global Authentication - No layout needed */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/auth/orus/callback" element={<AppAuthCallbackPage />} />
 
         {/* Onboarding with dedicated layout */}
         <Route path="/onboarding" element={<OnboardingLayout />}>
@@ -91,6 +123,14 @@ export function AppRoutes() {
           <Route path="health" element={<HealthPage />} />
           <Route path="assistant" element={<AiAssistantPage />} />
           <Route path="connect" element={<ConnectPage />} />
+          {/* Orus Module Routes - Protected */}
+          <Route path="private-equity" element={<OrusProtectedRoute><PrivateEquityPage /></OrusProtectedRoute>} />
+          <Route path="private-equity/simulation/:companyId" element={<OrusProtectedRoute><PESimulationPage /></OrusProtectedRoute>} />
+          <Route path="accounting" element={<OrusProtectedRoute><AccountingPage /></OrusProtectedRoute>} />
+          <Route path="shareholders" element={<OrusProtectedRoute><ShareholderPage /></OrusProtectedRoute>} />
+          <Route path="reports" element={<OrusProtectedRoute><ReportsPage /></OrusProtectedRoute>} />
+          <Route path="reports/config" element={<OrusProtectedRoute requiredRole={["superadmin", "admin"]}><ReportsConfigPage /></OrusProtectedRoute>} />
+          <Route path="administration" element={<OrusProtectedRoute requiredRole={["superadmin", "admin"]}><AdminPage /></OrusProtectedRoute>} />
           {/* Dynamic addon routes */}
           {dynamicRoutes.map(({ path, component: Component }) => (
             <Route
@@ -107,6 +147,9 @@ export function AppRoutes() {
           ))}
           <Route path="settings" element={<SettingsLayout />}>
             <Route index element={<GeneralSettingsPage />} />
+            <Route path="account" element={<SettingsAccountPage />} />
+            <Route path="account/profile" element={<SettingsProfilePage />} />
+            <Route path="account/password" element={<SettingsPasswordPage />} />
             <Route path="general" element={<GeneralSettingsPage />} />
             <Route path="accounts" element={<SettingsAccountsPage />} />
             <Route path="goals" element={<SettingsGoalsPage />} />
@@ -119,8 +162,11 @@ export function AppRoutes() {
             <Route path="securities" element={<AssetsPage />} />
             <Route path="taxonomies" element={<TaxonomiesPage />} />
             <Route path="connect" element={<ConnectSettingsPage />} />
+            <Route path="revolut" element={<RevolutSettingsPage />} />
+            <Route path="snaptrade" element={<SnapTradeSettingsPage />} />
             <Route path="ai-providers" element={<AiProvidersPage />} />
             <Route path="addons" element={<AddonSettingsPage />} />
+            <Route path="orus" element={<OrusSettingsPage />} />
           </Route>
           <Route path="*" element={<NotFoundPage />} />
         </Route>
