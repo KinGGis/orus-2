@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://orus-2.onrender.com/api/:path*"
+    },
+    {
+      "source": "/docs/:path*",
+      "destination": "https://orus-2.onrender.com/docs/:path*"
+    }
+  ]
+}
