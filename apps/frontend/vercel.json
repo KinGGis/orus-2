@@ -8,6 +8,10 @@
     {
       "source": "/docs/:path*",
       "destination": "https://orus-2.onrender.com/docs/:path*"
+    },
+    {
+      "source": "/((?!api/|docs/).*)",
+      "destination": "/index.html"
     }
   ]
 }
