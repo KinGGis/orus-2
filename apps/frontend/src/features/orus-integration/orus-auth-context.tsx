@@ -80,6 +80,34 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
   const [userRole, setUserRole] = useState<OrusUserRole | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const syncBackendSession = useCallback(async (accessToken: string) => {
+    const response = await fetch("/api/v1/auth/orus/session", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      credentials: "same-origin",
+    });
+
+    if (!response.ok) {
+      let message = "Failed to establish backend session";
+      try {
+        const body = (await response.json()) as { message?: string };
+        message = body.message ?? message;
+      } catch {
+        // Ignore non-JSON error bodies.
+      }
+      throw new Error(message);
+    }
+  }, []);
+
+  const clearBackendSession = useCallback(async () => {
+    await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+    }).catch(() => undefined);
+  }, []);
+
   // Fetch user profile from profiles table
   const fetchProfile = useCallback(async (userId: string) => {
     try {
@@ -157,6 +185,17 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
         if (!mounted) return;
 
         console.log("[OrusAuth] Auth state changed:", event);
+
+        try {
+          if (currentSession?.access_token) {
+            await syncBackendSession(currentSession.access_token);
+          } else {
+            await clearBackendSession();
+          }
+        } catch (error) {
+          console.error("[OrusAuth] Failed to synchronize backend session:", error);
+        }
+
         setSession(currentSession);
         setUser(currentSession?.user ?? null);
 
@@ -187,6 +226,12 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
         
         if (!mounted) return;
 
+        if (existingSession?.access_token) {
+          await syncBackendSession(existingSession.access_token);
+        } else {
+          await clearBackendSession();
+        }
+
         setSession(existingSession);
         setUser(existingSession?.user ?? null);
 
@@ -198,6 +243,7 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         console.error("[OrusAuth] Error getting session:", error);
+        await clearBackendSession();
       } finally {
         if (mounted) {
           setLoading(false);
@@ -211,19 +257,24 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, [fetchUserRole, fetchProfile, queryClient]);
+  }, [clearBackendSession, fetchUserRole, fetchProfile, queryClient, syncBackendSession]);
 
   // =====================================================
   // AUTH METHODS
   // =====================================================
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await orusSupabase.auth.signInWithPassword({
+    const { data, error } = await orusSupabase.auth.signInWithPassword({
       email,
       password,
     });
+
+    if (!error && data.session?.access_token) {
+      await syncBackendSession(data.session.access_token);
+    }
+
     return { error };
-  }, []);
+  }, [syncBackendSession]);
 
   const signUp = useCallback(async (email: string, password: string, fullName: string) => {
     const redirectUrl = `${window.location.origin}/auth/orus/callback`;
@@ -256,6 +307,8 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
       setUserRole(null);
       setProfile(null);
 
+      await clearBackendSession();
+
       // Clear queries
       queryClient.invalidateQueries({ queryKey: ["orus"] });
 
@@ -266,9 +319,10 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
       setSession(null);
       setUserRole(null);
       setProfile(null);
+      await clearBackendSession();
       return { error: null };
     }
-  }, [queryClient]);
+  }, [clearBackendSession, queryClient]);
 
   const resetPassword = useCallback(async (email: string) => {
     const redirectUrl = `${window.location.origin}/reset-password`;

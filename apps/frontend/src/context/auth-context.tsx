@@ -1,4 +1,5 @@
 import { isWeb } from "@/adapters";
+import { useOrusAuth } from "@/features/orus-integration/orus-auth-context";
 import { setUnauthorizedHandler } from "@/lib/auth-token";
 import {
   createContext,
@@ -6,8 +7,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
-  useState,
   type ReactNode,
 } from "react";
 
@@ -25,148 +24,42 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [requiresAuth, setRequiresAuth] = useState(false);
-  const [statusLoading, setStatusLoading] = useState(isWeb);
-  const [cookieSession, setCookieSession] = useState(false);
-  const [loginLoading, setLoginLoading] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const cookieSessionRef = useRef(false);
-
-  useEffect(() => {
-    cookieSessionRef.current = cookieSession;
-  }, [cookieSession]);
-
-  useEffect(() => {
-    if (!isWeb) {
-      setStatusLoading(false);
-      return;
-    }
-    let cancelled = false;
-    const loadStatus = async () => {
-      try {
-        const response = await fetch("/api/v1/auth/status", {
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          throw new Error(`Failed to check authentication status: ${response.status}`);
-        }
-        const data = (await response.json()) as { requiresPassword: boolean };
-        if (cancelled) return;
-        const needsAuth = Boolean(data?.requiresPassword);
-        setRequiresAuth(needsAuth);
-
-        // If auth is required, check if we have a valid cookie session
-        if (needsAuth) {
-          try {
-            const meRes = await fetch("/api/v1/auth/me", {
-              credentials: "same-origin",
-            });
-            if (meRes.ok && !cancelled) {
-              setCookieSession(true);
-            }
-          } catch {
-            // No valid session, user will need to log in
-          }
-        }
-      } catch (error) {
-        console.error("Failed to load authentication status", error);
-        if (!cancelled) {
-          setRequiresAuth(false);
-        }
-      } finally {
-        if (!cancelled) {
-          setStatusLoading(false);
-        }
-      }
-    };
-
-    void loadStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { isAuthenticated, loading, signOut } = useOrusAuth();
 
   useEffect(() => {
     const handler = () => {
-      const hadSession = cookieSessionRef.current;
-      setCookieSession(false);
-      if (hadSession) {
-        setLoginError("Session expired. Please sign in again.");
-      }
+      void signOut();
     };
     setUnauthorizedHandler(handler);
     return () => {
       setUnauthorizedHandler(null);
     };
-  }, []);
+  }, [signOut]);
 
-  const login = useCallback(async (password: string) => {
-    setLoginLoading(true);
-    setLoginError(null);
-    try {
-      const response = await fetch("/api/v1/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-        credentials: "same-origin",
-      });
-      if (!response.ok) {
-        if (response.status === 404) {
-          setRequiresAuth(false);
-        }
-        let message = "Invalid password";
-        try {
-          const body = await response.json();
-          message = body?.message ?? message;
-        } catch (parseError) {
-          console.error("Failed to parse login error", parseError);
-        }
-        throw new Error(message);
-      }
-      // Cookie is set by the server via Set-Cookie header
-      setCookieSession(true);
-      setLoginError(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Login failed";
-      setCookieSession(false);
-      setLoginError(message);
-      throw error;
-    } finally {
-      setLoginLoading(false);
-    }
+  const login = useCallback(async (_password: string) => {
+    throw new Error("Password login is disabled. Use the Orus login screen.");
   }, []);
 
   const logout = useCallback(() => {
-    // Clear server-side cookie session
-    if (isWeb) {
-      fetch("/api/v1/auth/logout", {
-        method: "POST",
-        credentials: "same-origin",
-      }).catch(() => {});
-    }
-    setCookieSession(false);
-    setLoginError(null);
-  }, []);
+    void signOut();
+  }, [signOut]);
 
-  const clearError = useCallback(() => setLoginError(null), []);
+  const clearError = useCallback(() => {}, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      requiresAuth,
-      isAuthenticated: !requiresAuth || cookieSession,
-      statusLoading,
-      loginLoading,
-      loginError,
+      requiresAuth: isWeb,
+      isAuthenticated: !isWeb || isAuthenticated,
+      statusLoading: isWeb ? loading : false,
+      loginLoading: false,
+      loginError: null,
       login,
       logout,
       clearError,
     }),
     [
-      requiresAuth,
-      cookieSession,
-      statusLoading,
-      loginLoading,
-      loginError,
+      isAuthenticated,
+      loading,
       login,
       logout,
       clearError,
@@ -196,7 +89,7 @@ export function AuthGate({ children, fallback }: { children: ReactNode; fallback
   }
 
   if (requiresAuth && !isAuthenticated) {
-    return <>{fallback}</>;
+    return fallback ? <>{fallback}</> : null;
   }
 
   return <>{children}</>;

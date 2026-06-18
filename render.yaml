@@ -8,6 +8,8 @@ services:
     envVars:
       - key: WF_LISTEN_ADDR
         value: 0.0.0.0:8080
+      - key: WF_STORAGE_BACKEND
+        sync: false
       - key: WF_DB_PATH
         value: /data/wealthfolio.db
       - key: WF_STATIC_DIR
@@ -16,11 +18,23 @@ services:
         value: 30000
       - key: WF_COOKIE_SECURE
         value: auto
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
       - key: WF_CORS_ALLOW_ORIGINS
         sync: false
       - key: WF_SECRET_KEY
         generateValue: true
       - key: WF_AUTH_PASSWORD_HASH
+        sync: false
+      - key: WF_ORUS_AUTH
+        value: true
+      - key: ORUS_SUPABASE_URL
+        sync: false
+      - key: ORUS_SUPABASE_ANON_KEY
+        sync: false
+      - key: WF_AUTH_REQUIRED
         sync: false
       - key: CONNECT_API_URL
         sync: false

@@ -84,7 +84,7 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
     };
 
     let openapi = ApiDoc::openapi();
-    let requires_auth = state.auth.is_some();
+    let requires_auth = state.auth.is_some() || state.orus_auth.is_some();
 
     // Compose all protected routes from individual modules
     #[allow(unused_mut)]
@@ -153,6 +153,7 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/auth/status", get(auth::auth_status))
+        .route("/auth/orus/session", axum::routing::post(auth::establish_orus_session))
         .route(
             "/auth/login",
             axum::routing::post(auth::login).layer(GovernorLayer::new(login_governor)),

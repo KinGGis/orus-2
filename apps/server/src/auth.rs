@@ -46,14 +46,20 @@ impl std::fmt::Display for CookieSecurePolicy {
 
 #[derive(Clone)]
 pub struct AuthConfig {
-    pub password_hash: String,
+    pub password_hash: Option<String>,
     pub jwt_secret: Vec<u8>,
     pub access_token_ttl: Duration,
     pub cookie_secure: CookieSecurePolicy,
 }
 
+#[derive(Clone)]
+pub struct OrusAuthConfig {
+    pub supabase_url: String,
+    pub supabase_anon_key: String,
+}
+
 pub struct AuthManager {
-    password_hash: String,
+    password_hash: Option<String>,
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
     validation: Validation,
@@ -61,11 +67,18 @@ pub struct AuthManager {
     cookie_secure: CookieSecurePolicy,
 }
 
+pub struct OrusAuthManager {
+    client: reqwest::Client,
+    user_info_url: String,
+    supabase_anon_key: String,
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     Unauthorized,
     InvalidCredentials,
     NotConfigured,
+    Disabled(String),
     Internal(String),
 }
 
@@ -102,7 +115,9 @@ pub struct AuthStatusResponse {
 
 impl AuthManager {
     pub fn new(config: &AuthConfig) -> anyhow::Result<Self> {
-        PasswordHash::new(&config.password_hash)?;
+        if let Some(password_hash) = &config.password_hash {
+            PasswordHash::new(password_hash)?;
+        }
         let encoding_key = EncodingKey::from_secret(&config.jwt_secret);
         let decoding_key = DecodingKey::from_secret(&config.jwt_secret);
         let mut validation = Validation::new(Algorithm::HS256);
@@ -117,8 +132,15 @@ impl AuthManager {
         })
     }
 
+    pub fn password_enabled(&self) -> bool {
+        self.password_hash.is_some()
+    }
+
     pub fn verify_password(&self, candidate: &str) -> Result<(), AuthError> {
-        let parsed = PasswordHash::new(&self.password_hash).map_err(|e| {
+        let password_hash = self.password_hash.as_ref().ok_or_else(|| {
+            AuthError::Disabled("Password login is disabled for this server".into())
+        })?;
+        let parsed = PasswordHash::new(password_hash).map_err(|e| {
             AuthError::Internal(format!("Invalid password hash configuration: {e}"))
         })?;
         Argon2::default()
@@ -187,6 +209,45 @@ impl AuthManager {
     }
 }
 
+impl OrusAuthManager {
+    pub fn new(config: &OrusAuthConfig) -> anyhow::Result<Self> {
+        let supabase_url = config.supabase_url.trim().trim_end_matches('/');
+        let supabase_anon_key = config.supabase_anon_key.trim();
+
+        if supabase_url.is_empty() {
+            anyhow::bail!("Orus Supabase URL must not be empty");
+        }
+        if supabase_anon_key.is_empty() {
+            anyhow::bail!("Orus Supabase anon key must not be empty");
+        }
+
+        Ok(Self {
+            client: reqwest::Client::new(),
+            user_info_url: format!("{supabase_url}/auth/v1/user"),
+            supabase_anon_key: supabase_anon_key.to_string(),
+        })
+    }
+
+    pub async fn validate_token(&self, token: &str) -> Result<(), AuthError> {
+        let response = self
+            .client
+            .get(&self.user_info_url)
+            .header("apikey", &self.supabase_anon_key)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|err| AuthError::Internal(format!("Failed to validate Orus token: {err}")))?;
+
+        match response.status() {
+            StatusCode::OK => Ok(()),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(AuthError::Unauthorized),
+            status => Err(AuthError::Internal(format!(
+                "Unexpected Orus auth response status: {status}"
+            ))),
+        }
+    }
+}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
@@ -198,6 +259,7 @@ impl IntoResponse for AuthError {
                 StatusCode::NOT_FOUND,
                 "Authentication is not configured for this server".to_string(),
             ),
+            AuthError::Disabled(message) => (StatusCode::FORBIDDEN, message),
             AuthError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
         let body = Json(AuthErrorBody {
@@ -257,6 +319,12 @@ pub async fn login(
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
+    if state.orus_auth.is_some() {
+        return Err(AuthError::Disabled(
+            "Password login is disabled. Authenticate with Orus instead.".into(),
+        ));
+    }
+
     let auth = state.auth.as_ref().ok_or(AuthError::NotConfigured)?.clone();
     auth.verify_password(&payload.password)?;
     let token = auth.issue_token()?;
@@ -306,8 +374,35 @@ pub async fn auth_status(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
 ) -> Json<AuthStatusResponse> {
     Json(AuthStatusResponse {
-        requires_password: state.auth.is_some(),
+        requires_password: state.auth.as_ref().is_some_and(|auth| auth.password_enabled())
+            && state.orus_auth.is_none(),
     })
+}
+
+pub async fn establish_orus_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Result<Response, AuthError> {
+    let auth = state.auth.as_ref().ok_or(AuthError::NotConfigured)?.clone();
+    let orus_auth = state.orus_auth.as_ref().ok_or(AuthError::NotConfigured)?.clone();
+    let token = extract_token(&request)?;
+
+    orus_auth.validate_token(&token).await?;
+
+    let session_token = auth.issue_token()?;
+    let ttl_secs = auth.expires_in().as_secs();
+    let cookie_value =
+        build_session_cookie(&session_token, ttl_secs, auth.should_secure_cookie(&headers));
+
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie_value)
+            .map_err(|e| AuthError::Internal(format!("Failed to set cookie: {e}")))?,
+    );
+
+    Ok(response)
 }
 
 pub async fn require_jwt(
@@ -390,7 +485,9 @@ mod tests {
 
     fn make_manager(policy: CookieSecurePolicy) -> AuthManager {
         let config = AuthConfig {
-            password_hash: "$argon2i$v=19$m=16,t=2,p=1$MTIzMjMyMzIz$/5nvsvwbwLNOxDtDae5XMQ".into(),
+            password_hash: Some(
+                "$argon2i$v=19$m=16,t=2,p=1$MTIzMjMyMzIz$/5nvsvwbwLNOxDtDae5XMQ".into(),
+            ),
             jwt_secret: vec![0u8; 32],
             access_token_ttl: Duration::from_secs(3600),
             cookie_secure: policy,

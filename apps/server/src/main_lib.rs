@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    ai_environment::ServerAiEnvironment, auth::AuthManager, config::Config,
+    ai_environment::ServerAiEnvironment, auth::{AuthManager, OrusAuthManager},
+    config::Config,
     domain_events::WebDomainEventSink, events::EventBus, secrets::build_secret_store,
 };
 use tracing::error;
@@ -102,6 +103,7 @@ pub struct AppState {
     pub secret_store: Arc<dyn SecretStore>,
     pub event_bus: EventBus,
     pub auth: Option<Arc<AuthManager>>,
+    pub orus_auth: Option<Arc<OrusAuthManager>>,
     pub device_enroll_service: Arc<DeviceEnrollService>,
     pub app_sync_repository: Arc<AppSyncRepository>,
     pub device_sync_runtime: Arc<DeviceSyncRuntimeState>,
@@ -460,6 +462,12 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .map(AuthManager::new)
         .transpose()?
         .map(Arc::new);
+    let orus_auth_manager = config
+        .orus_auth
+        .as_ref()
+        .map(OrusAuthManager::new)
+        .transpose()?
+        .map(Arc::new);
 
     Ok(Arc::new(AppState {
         domain_event_sink,
@@ -494,6 +502,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         secret_store,
         event_bus,
         auth: auth_manager,
+        orus_auth: orus_auth_manager,
         device_enroll_service,
         app_sync_repository,
         device_sync_runtime,

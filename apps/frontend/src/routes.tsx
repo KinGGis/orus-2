@@ -59,7 +59,10 @@ import {
   OrusResetPasswordPage as ResetPasswordPage,
   OrusAuthCallbackPage as AppAuthCallbackPage,
 } from "./pages/orus/auth";
-import { OrusProtectedRoute } from "./features/orus-integration/orus-auth-context";
+import {
+  OrusAuthGuard,
+  OrusProtectedRoute,
+} from "./features/orus-integration/orus-auth-context";
 
 export function AppRoutes() {
   const [dynamicRoutes, setDynamicRoutes] = useState<
@@ -103,11 +106,25 @@ export function AppRoutes() {
 
         {/* Onboarding with dedicated layout */}
         <Route path="/onboarding" element={<OnboardingLayout />}>
-          <Route index element={<OnboardingPage />} />
+          <Route
+            index
+            element={
+              <OrusAuthGuard>
+                <OnboardingPage />
+              </OrusAuthGuard>
+            }
+          />
         </Route>
 
         {/* Main app with sidebar */}
-        <Route path="/" element={<AppLayout />}>
+        <Route
+          path="/"
+          element={
+            <OrusAuthGuard>
+              <AppLayout />
+            </OrusAuthGuard>
+          }
+        >
           <Route index element={<PortfolioPage />} />
           <Route path="dashboard" element={<PortfolioPage />} />
           <Route path="activities" element={<ActivityPage />} />
