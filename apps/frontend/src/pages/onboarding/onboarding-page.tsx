@@ -1,5 +1,6 @@
 import { usePlatform } from "@/hooks/use-platform";
 import { useSettings } from "@/hooks/use-settings";
+import { useOrusAuth } from "@/features/orus-integration/orus-auth-context";
 import { WEALTHFOLIO_CONNECT_PORTAL_URL } from "@/lib/constants";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -17,18 +18,25 @@ const MOBILE_MAX_STEPS = 3;
 
 const OnboardingPage = () => {
   const { data: settings, isLoading: isSettingsLoading } = useSettings();
+  const {
+    profile,
+    loading: isOrusAuthLoading,
+    updateProfile,
+    completeOnboarding,
+  } = useOrusAuth();
   const { isMobile } = usePlatform();
   const { updateSettings } = useSettingsContext();
   const [currentStep, setCurrentStep] = useState(1);
   const [isStepValid, setIsStepValid] = useState(true);
+  const [isFinishing, setIsFinishing] = useState(false);
   const settingsStepRef = useRef<OnboardingStep2Handle>(null);
   const appearanceStepRef = useRef<OnboardingAppearanceHandle>(null);
   const maxSteps = isMobile ? MOBILE_MAX_STEPS : DESKTOP_MAX_STEPS;
   const completionRoute = isMobile ? "/settings" : "/settings/accounts";
   const isFinalStep = currentStep === maxSteps;
 
-  if (isSettingsLoading) return null;
-  if (settings?.onboardingCompleted) {
+  if (isSettingsLoading || isOrusAuthLoading) return null;
+  if (settings?.onboardingCompleted && profile?.onboarding_completed) {
     return <Navigate to={completionRoute} replace />;
   }
 
@@ -47,6 +55,33 @@ const OnboardingPage = () => {
       appearanceStepRef.current.submitForm();
     } else {
       handleNext();
+    }
+  };
+
+  const handleFinish = async () => {
+    setIsFinishing(true);
+
+    try {
+      if (profile) {
+        const profileUpdate: Parameters<typeof updateProfile>[0] = {
+          preferred_currency: settings?.baseCurrency || profile.preferred_currency,
+          preferred_language: profile.preferred_language || "fr",
+        };
+
+        const { error: profileError } = await updateProfile(profileUpdate);
+        if (profileError) {
+          throw profileError;
+        }
+
+        const { error: onboardingError } = await completeOnboarding();
+        if (onboardingError) {
+          throw onboardingError;
+        }
+      }
+
+      await updateSettings({ onboardingCompleted: true });
+    } finally {
+      setIsFinishing(false);
     }
   };
 
@@ -138,9 +173,10 @@ const OnboardingPage = () => {
                 <Button
                   data-testid="onboarding-finish-button"
                   className="from-primary to-primary/90 bg-linear-to-r order-1 sm:order-2"
-                  onClick={() => updateSettings({ onboardingCompleted: true })}
+                  onClick={() => void handleFinish()}
+                  disabled={isFinishing}
                 >
-                  Get Started
+                  {isFinishing ? "Finalisation..." : "Get Started"}
                   <Icons.ArrowRight className="ml-1.5 h-4 w-4" />
                 </Button>
               </div>

@@ -1,4 +1,3 @@
-import { isWeb } from "@/adapters";
 import { AuthProvider } from "@/context/auth-context";
 import { WealthfolioConnectProvider } from "@/features/wealthfolio-connect";
 import { DeviceSyncProvider } from "@/features/devices-sync";

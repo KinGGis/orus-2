@@ -3,6 +3,7 @@ import { MobileLoadingIndicator } from "@/components/mobile-loading-indicator";
 import { Toaster } from "@/components/sonner";
 import { UpdateDialog } from "@/components/update-dialog";
 import { PortfolioSyncProvider } from "@/context/portfolio-sync-context";
+import { useOrusAuth } from "@/features/orus-integration/orus-auth-context";
 import useNavigationEventListener from "@/hooks/use-navigation-event-listener";
 import { useIsMobileViewport, usePlatform } from "@/hooks/use-platform";
 import { useSettings } from "@/hooks/use-settings";
@@ -19,6 +20,7 @@ import { NavigationModeProvider, useNavigationMode } from "./navigation/navigati
 
 const AppLayoutContent = () => {
   const { data: settings, isLoading: isSettingsLoading } = useSettings();
+  const { profile, loading: isOrusAuthLoading } = useOrusAuth();
   const location = useLocation();
   const navigation = useNavigation();
   const { isMobile } = usePlatform();
@@ -37,9 +39,12 @@ const AppLayoutContent = () => {
   useGlobalEventListener();
   useNavigationEventListener();
 
-  if (isSettingsLoading) return null;
+  if (isSettingsLoading || isOrusAuthLoading) return null;
 
-  if (!settings?.onboardingCompleted && location.pathname !== "/onboarding") {
+  const needsInstanceOnboarding = !settings?.onboardingCompleted;
+  const needsUserOnboarding = !!profile && !profile.onboarding_completed;
+
+  if ((needsInstanceOnboarding || needsUserOnboarding) && location.pathname !== "/onboarding") {
     return <Navigate to="/onboarding" />;
   }
 
