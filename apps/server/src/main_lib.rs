@@ -2,13 +2,19 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    ai_environment::ServerAiEnvironment, auth::{AuthManager, OrusAuthManager},
+    app_sync_store::AppSyncStore,
+    ai_environment::ServerAiEnvironment,
+    auth::{AuthManager, OrusAuthManager},
     config::Config,
+    config::StorageBackend,
     domain_events::WebDomainEventSink, events::EventBus, secrets::build_secret_store,
+    revolut_store::RevolutStore,
+    user_store::UserStore,
 };
 use tracing::error;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
+use wealthfolio_ai::ChatRepositoryTrait;
 use wealthfolio_ai::{AiProviderService, AiProviderServiceTrait, ChatConfig, ChatService};
 use wealthfolio_connect::{
     BrokerSyncService, BrokerSyncServiceTrait, CoreImportRunRepositoryAdapter,
@@ -35,8 +41,8 @@ use wealthfolio_core::{
             HoldingsServiceTrait,
         },
         net_worth::{NetWorthService, NetWorthServiceTrait},
-        snapshot::{SnapshotService, SnapshotServiceTrait},
-        valuation::{ValuationService, ValuationServiceTrait},
+        snapshot::{SnapshotRepositoryTrait, SnapshotService, SnapshotServiceTrait},
+        valuation::{ValuationRepositoryTrait, ValuationService, ValuationServiceTrait},
     },
     quotes::{QuoteService, QuoteServiceTrait},
     secrets::SecretStore,
@@ -80,8 +86,8 @@ pub struct AppState {
     pub base_currency: Arc<RwLock<String>>,
     pub timezone: Arc<RwLock<String>>,
     pub snapshot_service: Arc<dyn SnapshotServiceTrait + Send + Sync>,
-    pub snapshot_repository: Arc<SnapshotRepository>,
-    pub valuation_repository: Arc<ValuationRepository>,
+    pub snapshot_repository: Arc<dyn SnapshotRepositoryTrait + Send + Sync>,
+    pub valuation_repository: Arc<dyn ValuationRepositoryTrait + Send + Sync>,
     pub performance_service:
         Arc<dyn wealthfolio_core::portfolio::performance::PerformanceServiceTrait + Send + Sync>,
     pub income_service: Arc<dyn IncomeServiceTrait + Send + Sync>,
@@ -105,13 +111,13 @@ pub struct AppState {
     pub auth: Option<Arc<AuthManager>>,
     pub orus_auth: Option<Arc<OrusAuthManager>>,
     pub device_enroll_service: Arc<DeviceEnrollService>,
-    pub app_sync_repository: Arc<AppSyncRepository>,
+    pub app_sync_repository: Arc<dyn AppSyncStore>,
     pub device_sync_runtime: Arc<DeviceSyncRuntimeState>,
     pub health_service: Arc<dyn HealthServiceTrait + Send + Sync>,
     pub token_lifecycle: Arc<TokenLifecycleState>,
     // DFC-specific repositories
-    pub user_repository: Arc<UserRepository>,
-    pub revolut_repository: Arc<RevolutRepository>,
+    pub user_repository: Arc<dyn UserStore>,
+    pub revolut_repository: Arc<dyn RevolutStore>,
     // DFC Revolut OAuth config (optional - only if env vars set)
     pub revolut_oauth_config: Option<Arc<RevolutOAuthConfig>>,
     // DFC SnapTrade config (optional - only if env vars set)
@@ -135,6 +141,401 @@ pub fn init_tracing() {
 }
 
 pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
+    if config.storage_backend == StorageBackend::Postgres {
+        let database_url = config
+            .database_url
+            .as_deref()
+            .expect("postgres backend validated during config parsing");
+        let data_root_path = std::path::Path::new(&config.db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let resolved_secret_path = std::env::var("WF_SECRET_FILE")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_root_path.join("secrets.json"));
+        let file_store = build_secret_store(
+            resolved_secret_path.clone(),
+            Some(config.secrets_encryption_key),
+            Some(&config.raw_secret_key),
+        )
+        .map_err(anyhow::Error::new)?;
+        let secret_store: Arc<dyn SecretStore> = Arc::new(file_store);
+        std::env::set_var(
+            "WF_SECRET_FILE",
+            resolved_secret_path.to_string_lossy().to_string(),
+        );
+
+        tracing::info!(
+            "WF_STORAGE_BACKEND=postgres selected; bootstrapping PostgreSQL-backed services"
+        );
+        wealthfolio_storage_postgres::run_migrations(database_url)?;
+        let pool = wealthfolio_storage_postgres::create_pool(database_url)?;
+        let domain_event_sink = Arc::new(WebDomainEventSink::new());
+
+        let fx_repo: Arc<dyn wealthfolio_core::fx::FxRepositoryTrait> = Arc::new(
+            wealthfolio_storage_postgres::fx::FxRepository::new(pool.clone()),
+        );
+        let fx_service: Arc<dyn FxServiceTrait + Send + Sync> = Arc::new(
+            FxService::new(fx_repo).with_event_sink(domain_event_sink.clone()),
+        );
+        fx_service.initialize()?;
+
+        let settings_repo: Arc<dyn SettingsRepositoryTrait> = Arc::new(
+            wealthfolio_storage_postgres::settings::SettingsRepository::new(pool.clone()),
+        );
+        let settings_service = Arc::new(SettingsService::new(
+            settings_repo.clone(),
+            fx_service.clone(),
+        ));
+        let settings = settings_service.get_settings()?;
+        let base_currency = Arc::new(RwLock::new(settings.base_currency.clone()));
+        let timezone = Arc::new(RwLock::new(settings.timezone.clone()));
+        let sqlite_app_sync_db_path = db::init(&config.db_path)?;
+        db::run_migrations(&sqlite_app_sync_db_path)?;
+        let sqlite_pool = db::create_pool(&sqlite_app_sync_db_path)?;
+        let sqlite_writer = write_actor::spawn_writer((*sqlite_pool).clone()).map_err(|e| {
+            error!("Failed to initialize SQLite writer actor for app sync bridge: {}", e);
+            e
+        })?;
+
+        let account_repo = Arc::new(
+            wealthfolio_storage_postgres::accounts::AccountRepository::new(pool.clone()),
+        );
+        let app_sync_repository: Arc<dyn AppSyncStore> = Arc::new(AppSyncRepository::new(
+            sqlite_pool.clone(),
+            sqlite_writer.clone(),
+        ));
+        let asset_repository = Arc::new(
+            wealthfolio_storage_postgres::assets::AssetRepository::new(pool.clone()),
+        );
+        let alternative_asset_repository: Arc<dyn AlternativeAssetRepositoryTrait + Send + Sync> =
+            Arc::new(wealthfolio_storage_postgres::assets::AlternativeAssetRepository::new(
+                pool.clone(),
+            ));
+        let market_data_repository = Arc::new(
+            wealthfolio_storage_postgres::market_data::MarketDataRepository::new(pool.clone()),
+        );
+        let quote_sync_state_repository = Arc::new(
+            wealthfolio_storage_postgres::market_data::QuoteSyncStateRepository::new(pool.clone()),
+        );
+        let activity_repository = Arc::new(
+            wealthfolio_storage_postgres::activities::ActivityRepository::new(pool.clone()),
+        );
+        let snapshot_repository = Arc::new(
+            wealthfolio_storage_postgres::portfolio::snapshot::SnapshotRepository::new(pool.clone()),
+        );
+        let valuation_repository = Arc::new(
+            wealthfolio_storage_postgres::portfolio::valuation::ValuationRepository::new(pool.clone()),
+        );
+        let goal_repository = Arc::new(
+            wealthfolio_storage_postgres::goals::GoalRepository::new(pool.clone()),
+        );
+        let taxonomy_repository = Arc::new(
+            wealthfolio_storage_postgres::taxonomies::TaxonomyRepository::new(pool.clone()),
+        );
+        let limits_repository = Arc::new(
+            wealthfolio_storage_postgres::limits::ContributionLimitRepository::new(pool.clone()),
+        );
+        let import_run_repository: Arc<dyn ImportRunRepositoryTrait> = Arc::new(
+            wealthfolio_storage_postgres::sync::ImportRunRepository::new(pool.clone()),
+        );
+        let broker_sync_state_repository = Arc::new(
+            wealthfolio_storage_postgres::sync::BrokerSyncStateRepository::new(pool.clone()),
+        );
+        let platform_repository = Arc::new(
+            wealthfolio_storage_postgres::sync::PlatformRepository::new(pool.clone()),
+        );
+        let health_dismissal_repository = Arc::new(
+            wealthfolio_storage_postgres::health::HealthDismissalRepository::new(pool.clone()),
+        );
+        let account_service = Arc::new(AccountService::new(
+            account_repo.clone(),
+            fx_service.clone(),
+            base_currency.clone(),
+            domain_event_sink.clone(),
+            asset_repository.clone(),
+            quote_sync_state_repository.clone(),
+        ));
+        let quote_service: Arc<dyn QuoteServiceTrait + Send + Sync> = Arc::new(QuoteService::new(
+                market_data_repository.clone(),
+                quote_sync_state_repository.clone(),
+                market_data_repository.clone(),
+                asset_repository.clone(),
+                activity_repository.clone(),
+                secret_store.clone(),
+            )
+            .await?);
+        let taxonomy_service: Arc<dyn TaxonomyServiceTrait + Send + Sync> =
+            Arc::new(TaxonomyService::new(taxonomy_repository));
+        let asset_service: Arc<dyn AssetServiceTrait + Send + Sync> = Arc::new(
+            AssetService::with_taxonomy_service(
+                asset_repository.clone(),
+                quote_service.clone(),
+                taxonomy_service.clone(),
+            )?
+            .with_event_sink(domain_event_sink.clone()),
+        );
+        let snapshot_repository: Arc<dyn SnapshotRepositoryTrait + Send + Sync> = snapshot_repository;
+        let snapshot_service: Arc<dyn SnapshotServiceTrait + Send + Sync> = Arc::new(
+            SnapshotService::new_with_timezone(
+                base_currency.clone(),
+                timezone.clone(),
+                account_repo.clone(),
+                activity_repository.clone(),
+                snapshot_repository.clone(),
+                asset_repository.clone(),
+                fx_service.clone(),
+            )
+            .with_event_sink(domain_event_sink.clone()),
+        );
+        let valuation_repository: Arc<dyn ValuationRepositoryTrait + Send + Sync> = valuation_repository;
+        let valuation_service: Arc<dyn ValuationServiceTrait + Send + Sync> = Arc::new(
+            ValuationService::new(
+                base_currency.clone(),
+                valuation_repository.clone(),
+                snapshot_service.clone(),
+                quote_service.clone(),
+                fx_service.clone(),
+            ),
+        );
+        let net_worth_service: Arc<dyn NetWorthServiceTrait + Send + Sync> = Arc::new(
+            NetWorthService::new(
+                base_currency.clone(),
+                account_repo.clone(),
+                asset_repository.clone(),
+                snapshot_repository.clone(),
+                quote_service.clone(),
+                valuation_repository.clone(),
+                fx_service.clone(),
+            ),
+        );
+        let holdings_valuation_service = Arc::new(HoldingsValuationService::new_with_timezone(
+            fx_service.clone(),
+            quote_service.clone(),
+            timezone.clone(),
+        ));
+        let classification_service = Arc::new(AssetClassificationService::new(taxonomy_service.clone()));
+        let holdings_service: Arc<dyn HoldingsServiceTrait + Send + Sync> = Arc::new(
+            HoldingsService::new_with_timezone(
+                asset_service.clone(),
+                snapshot_service.clone(),
+                holdings_valuation_service,
+                classification_service,
+                timezone.clone(),
+            ),
+        );
+        let allocation_service: Arc<dyn AllocationServiceTrait + Send + Sync> = Arc::new(
+            AllocationService::new(holdings_service.clone(), taxonomy_service.clone()),
+        );
+        let performance_service: Arc<
+            dyn wealthfolio_core::portfolio::performance::PerformanceServiceTrait + Send + Sync,
+        > = Arc::new(
+            wealthfolio_core::portfolio::performance::PerformanceService::new_with_timezone(
+                valuation_service.clone(),
+                quote_service.clone(),
+                timezone.clone(),
+            ),
+        );
+        let income_service: Arc<dyn IncomeServiceTrait + Send + Sync> = Arc::new(
+            IncomeService::new_with_timezone(
+                fx_service.clone(),
+                activity_repository.clone(),
+                base_currency.clone(),
+                timezone.clone(),
+            ),
+        );
+        let goal_service: Arc<dyn GoalServiceTrait + Send + Sync> = Arc::new(
+            GoalService::new(goal_repository),
+        );
+        let limits_service: Arc<dyn ContributionLimitServiceTrait + Send + Sync> = Arc::new(
+            ContributionLimitService::new_with_timezone(
+                fx_service.clone(),
+                limits_repository,
+                activity_repository.clone(),
+                timezone.clone(),
+            ),
+        );
+        let core_import_run_repository = Arc::new(CoreImportRunRepositoryAdapter::new(
+            import_run_repository.clone(),
+        ));
+        let activity_service: Arc<dyn ActivityServiceTrait + Send + Sync> = Arc::new(
+            CoreActivityService::with_import_run_repository(
+                activity_repository.clone(),
+                account_service.clone(),
+                asset_service.clone(),
+                fx_service.clone(),
+                quote_service.clone(),
+                core_import_run_repository,
+            )
+            .with_event_sink(domain_event_sink.clone()),
+        );
+        let alternative_asset_service: Arc<dyn AlternativeAssetServiceTrait + Send + Sync> =
+            Arc::new(
+                AlternativeAssetService::new(
+                    alternative_asset_repository,
+                    asset_repository.clone(),
+                    quote_service.clone(),
+                )
+                .with_event_sink(domain_event_sink.clone()),
+            );
+        let connect_sync_service: Arc<dyn BrokerSyncServiceTrait + Send + Sync> = Arc::new(
+            BrokerSyncService::new(
+                account_service.clone(),
+                asset_service.clone(),
+                activity_service.clone(),
+                activity_repository.clone(),
+                platform_repository,
+                broker_sync_state_repository,
+                import_run_repository,
+                snapshot_repository.clone(),
+            )
+            .with_event_sink(domain_event_sink.clone())
+            .with_snapshot_service(snapshot_service.clone()),
+        );
+        let health_service: Arc<dyn HealthServiceTrait + Send + Sync> = Arc::new(
+            HealthService::new(health_dismissal_repository),
+        );
+
+        let data_root = data_root_path.to_string_lossy().to_string();
+        let ai_catalog_json = include_str!("../../../crates/ai/src/ai_providers.json");
+        let ai_provider_service: Arc<dyn AiProviderServiceTrait + Send + Sync> = Arc::new(
+            AiProviderService::new(
+                settings_repo.clone(),
+                secret_store.clone(),
+                ai_catalog_json,
+            )?,
+        );
+        let ai_chat_repository: Arc<dyn ChatRepositoryTrait + Send + Sync> = Arc::new(
+            wealthfolio_storage_postgres::ai_chat::AiChatRepository::new(pool.clone()),
+        );
+        let ai_environment = Arc::new(ServerAiEnvironment::new(
+            base_currency.clone(),
+            account_service.clone(),
+            activity_service.clone(),
+            holdings_service.clone(),
+            valuation_service.clone(),
+            goal_service.clone(),
+            settings_service.clone(),
+            secret_store.clone(),
+            ai_chat_repository,
+            quote_service.clone(),
+            allocation_service.clone(),
+            performance_service.clone(),
+            income_service.clone(),
+        ));
+        let ai_chat_service = Arc::new(ChatService::new(ai_environment, ChatConfig::default()));
+
+        let cloud_api_url = crate::features::cloud_api_base_url().unwrap_or_default();
+        let device_display_name = "Wealthfolio Server".to_string();
+        let app_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        let device_enroll_service = Arc::new(DeviceEnrollService::new(
+            secret_store.clone(),
+            &cloud_api_url,
+            device_display_name,
+            app_version,
+        ));
+
+        let event_bus = EventBus::new(256);
+        let device_sync_runtime = Arc::new(DeviceSyncRuntimeState::new());
+        let token_lifecycle = Arc::new(TokenLifecycleState::new());
+        let user_repository: Arc<dyn UserStore> = Arc::new(
+            wealthfolio_storage_postgres::users::UserRepository::new(pool.clone()),
+        );
+        let revolut_repository: Arc<dyn RevolutStore> = Arc::new(
+            wealthfolio_storage_postgres::revolut::RevolutRepository::new(pool.clone()),
+        );
+
+        let revolut_oauth_config = RevolutOAuthConfig::from_env().map(Arc::new);
+        if revolut_oauth_config.is_some() {
+            tracing::info!(
+                "Revolut OAuth configured (sandbox={})",
+                revolut_oauth_config.as_ref().unwrap().sandbox
+            );
+        }
+        let snaptrade_config = SnapTradeConfig::from_env().map(Arc::new);
+        if snaptrade_config.is_some() {
+            tracing::info!("SnapTrade API configured");
+        }
+
+        domain_event_sink.start_worker(
+            asset_service.clone(),
+            connect_sync_service.clone(),
+            event_bus.clone(),
+            health_service.clone(),
+            snapshot_service.clone(),
+            quote_service.clone(),
+            valuation_service.clone(),
+            account_service.clone(),
+            fx_service.clone(),
+            secret_store.clone(),
+            token_lifecycle.clone(),
+        );
+
+        let addon_service: Arc<dyn AddonServiceTrait + Send + Sync> = Arc::new(AddonService::new(
+            &config.addons_root,
+            &settings.instance_id,
+        ));
+
+        let auth_manager = config
+            .auth
+            .as_ref()
+            .map(AuthManager::new)
+            .transpose()?
+            .map(Arc::new);
+        let orus_auth_manager = config
+            .orus_auth
+            .as_ref()
+            .map(OrusAuthManager::new)
+            .transpose()?
+            .map(Arc::new);
+
+        return Ok(Arc::new(AppState {
+            domain_event_sink,
+            account_service,
+            settings_service,
+            holdings_service,
+            valuation_service,
+            allocation_service,
+            quote_service,
+            base_currency,
+            timezone,
+            snapshot_service,
+            snapshot_repository,
+            valuation_repository,
+            performance_service,
+            income_service,
+            goal_service,
+            limits_service,
+            fx_service: fx_service.clone(),
+            activity_service,
+            asset_service,
+            taxonomy_service,
+            net_worth_service,
+            alternative_asset_service,
+            addon_service,
+            connect_sync_service,
+            ai_provider_service,
+            ai_chat_service,
+            data_root,
+            db_path: sqlite_app_sync_db_path,
+            instance_id: settings.instance_id,
+            secret_store,
+            event_bus,
+            auth: auth_manager,
+            orus_auth: orus_auth_manager,
+            device_enroll_service,
+            app_sync_repository,
+            device_sync_runtime,
+            health_service,
+            token_lifecycle,
+            user_repository,
+            revolut_repository,
+            revolut_oauth_config,
+            snaptrade_config,
+        }));
+    }
+
     // Ensure DATABASE_URL aligns with WF_DB_PATH so core picks the right file
     std::env::set_var("DATABASE_URL", &config.db_path);
     let db_path = db::init(&config.db_path)?;
@@ -191,7 +592,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let asset_repository = Arc::new(AssetRepository::new(pool.clone(), writer.clone()));
     let market_data_repository = Arc::new(MarketDataRepository::new(pool.clone(), writer.clone()));
     let activity_repository = Arc::new(ActivityRepository::new(pool.clone(), writer.clone()));
-    let snapshot_repository = Arc::new(SnapshotRepository::new(pool.clone(), writer.clone()));
+    let snapshot_repository: Arc<dyn SnapshotRepositoryTrait + Send + Sync> =
+        Arc::new(SnapshotRepository::new(pool.clone(), writer.clone()));
     let app_sync_repository = Arc::new(AppSyncRepository::new(pool.clone(), writer.clone()));
     let quote_sync_state_repository =
         Arc::new(QuoteSyncStateRepository::new(pool.clone(), writer.clone()));
@@ -241,7 +643,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .with_event_sink(domain_event_sink.clone()),
     );
 
-    let valuation_repository = Arc::new(ValuationRepository::new(pool.clone(), writer.clone()));
+    let valuation_repository: Arc<dyn ValuationRepositoryTrait + Send + Sync> =
+        Arc::new(ValuationRepository::new(pool.clone(), writer.clone()));
     let valuation_service = Arc::new(ValuationService::new(
         base_currency.clone(),
         valuation_repository.clone(),
@@ -378,7 +781,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         )?);
 
     // AI chat repository for thread/message persistence
-    let ai_chat_repository = Arc::new(AiChatRepository::new(pool.clone(), writer.clone()));
+    let ai_chat_repository: Arc<dyn ChatRepositoryTrait + Send + Sync> =
+        Arc::new(AiChatRepository::new(pool.clone(), writer.clone()));
 
     // Create the AI environment and chat service using the new wealthfolio-ai crate
     let ai_environment = Arc::new(ServerAiEnvironment::new(
@@ -420,8 +824,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let token_lifecycle = Arc::new(TokenLifecycleState::new());
 
     // DFC-specific repositories for RBAC and Revolut integration
-    let user_repository = Arc::new(UserRepository::new(pool.clone()));
-    let revolut_repository = Arc::new(RevolutRepository::new(pool.clone()));
+    let user_repository: Arc<dyn UserStore> = Arc::new(UserRepository::new(pool.clone()));
+    let revolut_repository: Arc<dyn RevolutStore> = Arc::new(RevolutRepository::new(pool.clone()));
 
     // DFC Revolut OAuth config (optional - read from env vars)
     let revolut_oauth_config = RevolutOAuthConfig::from_env().map(Arc::new);

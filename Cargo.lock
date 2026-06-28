@@ -8045,6 +8045,7 @@ dependencies = [
  "wealthfolio-core",
  "wealthfolio-device-sync",
  "wealthfolio-market-data",
+ "wealthfolio-storage-postgres",
  "wealthfolio-storage-sqlite",
 ]
 
@@ -8053,15 +8054,20 @@ name = "wealthfolio-storage-postgres"
 version = "3.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bigdecimal",
  "chrono",
  "diesel",
  "diesel_migrations",
  "log",
  "r2d2",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "uuid",
+ "wealthfolio-ai",
+ "wealthfolio-connect",
  "wealthfolio-core",
 ]
 

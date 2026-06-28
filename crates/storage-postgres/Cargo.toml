@@ -12,6 +12,8 @@ default = []
 [dependencies]
 # Internal crates
 wealthfolio-core = { workspace = true }
+wealthfolio-connect = { workspace = true }
+wealthfolio-ai = { workspace = true }
 
 # Workspace dependencies
 serde = { workspace = true }
@@ -21,6 +23,9 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
+async-trait = { workspace = true }
+rust_decimal = { workspace = true }
+bigdecimal = "0.4"
 
 # PostgreSQL / Diesel
 diesel = { version = "2.2", features = ["postgres", "chrono", "r2d2", "numeric", "uuid", "serde_json"] }

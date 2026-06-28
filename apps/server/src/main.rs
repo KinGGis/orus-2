@@ -1,4 +1,5 @@
 mod ai_environment;
+mod app_sync_store;
 mod api;
 mod auth;
 mod config;
@@ -8,8 +9,10 @@ mod events;
 mod features;
 mod main_lib;
 mod models;
+mod revolut_store;
 mod scheduler;
 mod secrets;
+mod user_store;
 
 use api::app_router;
 use config::Config;

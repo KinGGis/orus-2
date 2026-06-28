@@ -21,13 +21,30 @@
 //!          Supabase PostgreSQL
 //! ```
 
+pub mod accounts;
+pub mod activities;
+pub mod ai_chat;
+pub mod assets;
 pub mod db;
 pub mod errors;
+pub mod fx;
+pub mod goals;
+pub mod health;
+pub mod limits;
+pub mod market_data;
+pub mod portfolio;
+pub mod revolut;
 pub mod schema;
+pub mod settings;
+pub mod sync;
+pub mod system_accounts;
+pub mod taxonomies;
+pub mod users;
 
 // Repository implementations (to be added)
 // pub mod accounts;
 // pub mod activities;
+// pub mod fx;
 // etc.
 
 // Re-export database utilities

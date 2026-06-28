@@ -3,7 +3,7 @@
 
 diesel::table! {
     wf_platforms (id) {
-        id -> Uuid,
+        id -> Text,
         name -> Nullable<Text>,
         url -> Text,
         external_id -> Nullable<Text>,
@@ -25,7 +25,7 @@ diesel::table! {
         is_active -> Bool,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
-        platform_id -> Nullable<Uuid>,
+        platform_id -> Nullable<Text>,
         account_number -> Nullable<Text>,
         meta -> Nullable<Jsonb>,
         provider -> Nullable<Text>,

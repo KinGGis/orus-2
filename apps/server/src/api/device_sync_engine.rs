@@ -7,6 +7,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
+use crate::app_sync_store::{AppSyncStore, AppSyncTableRowCount};
 use crate::main_lib::AppState;
 use wealthfolio_core::events::DomainEvent;
 use wealthfolio_core::sync::APP_SYNC_TABLES;
@@ -30,8 +31,6 @@ fn transport_err_from_sync(e: wealthfolio_device_sync::DeviceSyncError) -> Trans
         },
     }
 }
-use wealthfolio_storage_sqlite::sync::{SqliteSyncEngineDbPorts, SyncTableRowCount};
-
 const SYNC_IDENTITY_KEY: &str = "sync_identity";
 static MIN_SNAPSHOT_CREATED_AT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 const SNAPSHOT_FRESHNESS_CLOCK_SKEW_LEEWAY_SECS: i64 = 120;
@@ -268,12 +267,12 @@ fn decode_snapshot_sqlite_payload(
 
 struct ServerEnginePorts {
     state: Arc<AppState>,
-    db: SqliteSyncEngineDbPorts,
+    db: Arc<dyn AppSyncStore>,
 }
 
 impl ServerEnginePorts {
     fn new(state: Arc<AppState>) -> Self {
-        let db = SqliteSyncEngineDbPorts::new(Arc::clone(&state.app_sync_repository));
+        let db = Arc::clone(&state.app_sync_repository);
         Self { state, db }
     }
 }
@@ -284,7 +283,7 @@ impl OutboxStore for ServerEnginePorts {
         &self,
         limit: i64,
     ) -> Result<Vec<wealthfolio_core::sync::SyncOutboxEvent>, String> {
-        self.db.list_pending_outbox(limit).await
+        self.db.list_pending_outbox(limit).map_err(|e| e.to_string())
     }
 
     async fn mark_outbox_dead(
@@ -296,10 +295,14 @@ impl OutboxStore for ServerEnginePorts {
         self.db
             .mark_outbox_dead(event_ids, error_message, error_code)
             .await
+            .map_err(|e| e.to_string())
     }
 
     async fn mark_outbox_sent(&self, event_ids: Vec<String>) -> Result<(), String> {
-        self.db.mark_outbox_sent(event_ids).await
+        self.db
+            .mark_outbox_sent(event_ids)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn schedule_outbox_retry(
@@ -312,48 +315,60 @@ impl OutboxStore for ServerEnginePorts {
         self.db
             .schedule_outbox_retry(event_ids, delay_seconds, error_message, error_code)
             .await
+            .map_err(|e| e.to_string())
     }
 
     async fn mark_push_completed(&self) -> Result<(), String> {
-        self.db.mark_push_completed().await
+        self.db.mark_push_completed().await.map_err(|e| e.to_string())
     }
 
     async fn has_pending_outbox(&self) -> Result<bool, String> {
-        self.db.has_pending_outbox().await
+        self.db
+            .list_pending_outbox(1)
+            .map(|rows| !rows.is_empty())
+            .map_err(|e| e.to_string())
     }
 }
 
 #[async_trait]
 impl ReplayStore for ServerEnginePorts {
     async fn acquire_cycle_lock(&self) -> Result<i64, String> {
-        self.db.acquire_cycle_lock().await
+        self.db.acquire_cycle_lock().await.map_err(|e| e.to_string())
     }
 
     async fn verify_cycle_lock(&self, lock_version: i64) -> Result<bool, String> {
-        self.db.verify_cycle_lock(lock_version).await
+        self.db
+            .verify_cycle_lock(lock_version)
+            .map_err(|e| e.to_string())
     }
 
     async fn get_cursor(&self) -> Result<i64, String> {
-        self.db.get_cursor().await
+        self.db.get_cursor().map_err(|e| e.to_string())
     }
 
     async fn set_cursor(&self, cursor: i64) -> Result<(), String> {
-        self.db.set_cursor(cursor).await
+        self.db.set_cursor(cursor).await.map_err(|e| e.to_string())
     }
 
     async fn apply_remote_events_lww_batch(
         &self,
         events: Vec<ReplayEvent>,
     ) -> Result<usize, String> {
-        self.db.apply_remote_events_lww_batch(events).await
+        self.db
+            .apply_remote_events_lww_batch(events)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn apply_remote_event_lww(&self, event: ReplayEvent) -> Result<bool, String> {
-        self.db.apply_remote_event_lww(event).await
+        self.db
+            .apply_remote_event_lww(event)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn mark_pull_completed(&self) -> Result<(), String> {
-        self.db.mark_pull_completed().await
+        self.db.mark_pull_completed().await.map_err(|e| e.to_string())
     }
 
     async fn mark_cycle_outcome(
@@ -365,18 +380,23 @@ impl ReplayStore for ServerEnginePorts {
         self.db
             .mark_cycle_outcome(status, duration_ms, next_retry_at)
             .await
+            .map_err(|e| e.to_string())
     }
 
     async fn mark_engine_error(&self, message: String) -> Result<(), String> {
-        self.db.mark_engine_error(message).await
+        self.db.mark_engine_error(message).await.map_err(|e| e.to_string())
     }
 
     async fn prune_applied_events_up_to_seq(&self, seq: i64) -> Result<(), String> {
-        self.db.prune_applied_events_up_to_seq(seq).await
+        self.db
+            .prune_applied_events_up_to_seq(seq)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn get_engine_status(&self) -> Result<wealthfolio_core::sync::SyncEngineStatus, String> {
-        self.db.get_engine_status().await
+        self.db.get_engine_status().map_err(|e| e.to_string())
     }
 
     async fn on_pull_complete(&self, pulled_count: usize) -> Result<(), String> {
@@ -553,12 +573,10 @@ pub async fn get_bootstrap_overwrite_check(
         non_empty_tables: summary
             .non_empty_tables
             .into_iter()
-            .map(
-                |SyncTableRowCount { table, rows }| SyncBootstrapOverwriteCheckTableResult {
-                    table,
-                    rows,
-                },
-            )
+            .map(|AppSyncTableRowCount { table, rows }| SyncBootstrapOverwriteCheckTableResult {
+                table,
+                rows,
+            })
             .collect(),
     })
 }
