@@ -34,6 +34,9 @@ impl From<StorageError> for Error {
             StorageError::QueryError(msg) => Error::Database(DatabaseError::QueryFailed(msg)),
             StorageError::MigrationError(msg) => Error::Database(DatabaseError::MigrationFailed(msg)),
             StorageError::NotFound(msg) => Error::Database(DatabaseError::NotFound(msg)),
+            StorageError::DieselError(diesel::result::Error::NotFound) => {
+                Error::Database(DatabaseError::NotFound("Record not found".to_string()))
+            }
             StorageError::DieselError(e) => Error::Database(DatabaseError::QueryFailed(e.to_string())),
             StorageError::PoolError(msg) => Error::Database(DatabaseError::PoolCreationFailed(msg)),
             StorageError::SerializationError(msg) => Error::Database(DatabaseError::QueryFailed(msg)),
