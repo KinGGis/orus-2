@@ -1,5 +1,5 @@
 # Global build args
-ARG RUST_IMAGE=rust:1.91-alpine
+ARG RUST_IMAGE=rust:1.91-bookworm
 
 # Stage 1: build frontend
 # Use --platform=$BUILDPLATFORM to run on the native runner (fast)
@@ -22,26 +22,22 @@ RUN npm install -g pnpm@9.9.0 && pnpm install --frozen-lockfile
 # The current frontend type-check is not green yet, but the production bundle builds successfully.
 RUN pnpm --filter frontend exec vite build && mv dist /web-dist
 
-# Stage 2: build server with cross-compilation
-FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
-
+# Stage 2: build server natively with glibc.
+# The Postgres-backed storage layer links against libpq, which is not available
+# in the current musl static toolchain used by Render builds.
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS backend
-# Copy xx scripts to handle cross-compilation
-COPY --from=xx / /
-ARG TARGETPLATFORM
 WORKDIR /app
 
-# Install build tools for the HOST (to run cargo, build scripts)
-# clang/lld are needed for cross-linking
-# pkgconfig is required for openssl-sys to find the target libraries
-RUN apk add --no-cache clang lld build-base git file pkgconfig
-
-# Install TARGET dependencies
-# xx-apk installs into /$(xx-info triple)/...
-RUN xx-apk add --no-cache musl-dev gcc openssl-dev openssl-libs-static sqlite-dev
-
-# Install rust target
-RUN rustup target add $(xx-cargo --print-target-triple)
+# Install native build dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    clang \
+    git \
+    libpq-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 # Leverage Docker layer caching for dependencies
 COPY Cargo.toml Cargo.lock ./
@@ -52,21 +48,25 @@ COPY apps/tauri/Cargo.toml apps/tauri/Cargo.toml
 RUN mkdir -p apps/tauri/src && echo "fn main(){}" > apps/tauri/src/main.rs && echo "" > apps/tauri/src/lib.rs
 RUN mkdir -p apps/server/src && \
     echo "fn main(){}" > apps/server/src/main.rs && \
-    xx-cargo fetch --manifest-path apps/server/Cargo.toml
+    cargo fetch --manifest-path apps/server/Cargo.toml
 
 # Now copy full sources
 COPY crates ./crates
 COPY apps/server ./apps/server
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 ENV OPENSSL_STATIC=1
-# Build using xx-cargo which handles target flags
-RUN xx-cargo build --release --manifest-path apps/server/Cargo.toml && \
-    # Move the binary to a predictable location because the target dir changes with --target
-    cp target/$(xx-cargo --print-target-triple)/release/wealthfolio-server /wealthfolio-server
+# Build the release binary.
+RUN cargo build --release --manifest-path apps/server/Cargo.toml && \
+    cp target/release/wealthfolio-server /wealthfolio-server
 
 # Final stage
-FROM alpine:3.19
+FROM debian:bookworm-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libpq5 \
+    libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/*
 # Copy from backend (which is now build platform, but binary is target platform)
 COPY --from=backend /wealthfolio-server /usr/local/bin/wealthfolio-server
 COPY --from=frontend /web-dist ./dist
