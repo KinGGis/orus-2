@@ -31,6 +31,11 @@ use log::warn;
 use uuid::Uuid;
 use wealthfolio_market_data::mic_to_currency;
 
+/// Maximum total time spent resolving missing symbols to exchange MICs during
+/// import validation. Kept below the server request timeout so a slow or
+/// unreachable market-data provider degrades gracefully instead of returning 408.
+const SYMBOL_RESOLUTION_BUDGET_SECS: u64 = 12;
+
 /// Service for managing activities
 pub struct ActivityService {
     activity_repository: Arc<dyn ActivityRepositoryTrait>,
@@ -581,10 +586,42 @@ impl ActivityService {
             }
         }
 
-        // 3. Resolve missing symbols via quote service using the activity currency
-        for (symbol, currency) in missing {
-            let exchange_mic = self.resolve_symbol_exchange_mic(&symbol, &currency).await;
-            cache.insert((symbol, currency), exchange_mic);
+        // 3. Resolve missing symbols via quote service concurrently, bounded by an
+        //    overall timeout so import validation stays responsive even when the
+        //    market-data provider is slow or unreachable. The exchange MIC is
+        //    best-effort here and is re-resolved later during portfolio sync, so
+        //    unresolved symbols safely default to None rather than blocking the
+        //    request until the server-side timeout returns a 408.
+        if !missing.is_empty() {
+            let resolutions = missing.iter().map(|(symbol, currency)| async move {
+                let mic = self.resolve_symbol_exchange_mic(symbol, currency).await;
+                ((symbol.clone(), currency.clone()), mic)
+            });
+
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(SYMBOL_RESOLUTION_BUDGET_SECS),
+                futures::future::join_all(resolutions),
+            )
+            .await
+            {
+                Ok(results) => {
+                    for (key, mic) in results {
+                        cache.insert(key, mic);
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        "Symbol resolution timed out after {}s; leaving {} symbol(s) unresolved (MIC will be resolved during sync)",
+                        SYMBOL_RESOLUTION_BUDGET_SECS,
+                        missing.len()
+                    );
+                }
+            }
+
+            // Any symbols not resolved within the budget default to None.
+            for (symbol, currency) in missing {
+                cache.entry((symbol, currency)).or_insert(None);
+            }
         }
 
         cache
