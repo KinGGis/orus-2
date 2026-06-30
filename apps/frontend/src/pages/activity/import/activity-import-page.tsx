@@ -91,8 +91,12 @@ function useStepValidation(isHoldingsMode: boolean) {
 
     switch (step) {
       case "upload":
-        // Can proceed if file is uploaded and parsed successfully
-        return file !== null && headers.length > 0 && parsedRows.length > 0;
+        // Can proceed if an account is selected and the file is uploaded and parsed successfully.
+        // Requiring the account here prevents importing with an empty accountId, which the backend
+        // rejects when it parses the account_id as a UUID.
+        return (
+          !!state.accountId && file !== null && headers.length > 0 && parsedRows.length > 0
+        );
 
       case "mapping": {
         if (isHoldingsMode) {

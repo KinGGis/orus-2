@@ -947,44 +947,89 @@ export function ReviewStep() {
     (rowIndex: number, updates: Partial<DraftActivity>) => {
       // Find the current draft and merge with updates
       const currentDraft = draftActivities.find((d) => d.rowIndex === rowIndex);
-      if (currentDraft) {
-        const symbolChanged =
-          Object.prototype.hasOwnProperty.call(updates, "symbol") &&
-          updates.symbol !== currentDraft.symbol;
-        const sanitizedUpdates: Partial<DraftActivity> = symbolChanged
-          ? {
-              symbolName: undefined,
-              exchangeMic: undefined,
-              quoteCcy: undefined,
-              instrumentType: undefined,
-              quoteMode: undefined,
-              ...updates,
-            }
-          : updates;
-        const mergedDraft = { ...currentDraft, ...sanitizedUpdates };
-        // Re-validate the merged draft
-        const validation = validateDraft(mergedDraft);
-        // Don't override status if it was explicitly skipped.
-        const shouldRevalidateStatus = currentDraft.status !== "skipped";
-        dispatch(
-          updateDraft(rowIndex, {
-            ...sanitizedUpdates,
-            ...(shouldRevalidateStatus
-              ? {
-                  status: validation.status,
-                  errors: validation.errors,
-                  warnings: validation.warnings,
-                  duplicateOfId: undefined,
-                  duplicateOfLineNumber: undefined,
-                }
-              : {}),
-          }),
-        );
-      } else {
+      if (!currentDraft) {
         dispatch(updateDraft(rowIndex, updates));
+        return;
       }
+
+      const symbolChanged =
+        Object.prototype.hasOwnProperty.call(updates, "symbol") &&
+        updates.symbol !== currentDraft.symbol;
+      const sanitizedUpdates: Partial<DraftActivity> = symbolChanged
+        ? {
+            symbolName: undefined,
+            exchangeMic: undefined,
+            quoteCcy: undefined,
+            instrumentType: undefined,
+            quoteMode: undefined,
+            ...updates,
+          }
+        : updates;
+
+      // When a symbol is corrected, propagate the fix to every other row that shares
+      // the same original symbol so the user only has to map each ticker once. The
+      // correction is also recorded in symbolMappings for future imports.
+      const originalSymbol = currentDraft.symbol;
+      const newSymbol = updates.symbol;
+      const shouldPropagate =
+        symbolChanged &&
+        !!originalSymbol &&
+        !!newSymbol &&
+        draftActivities.some((d) => d.rowIndex !== rowIndex && d.symbol === originalSymbol);
+
+      if (shouldPropagate) {
+        const nextDrafts = draftActivities.map((draft) => {
+          if (draft.symbol !== originalSymbol || draft.status === "skipped") return draft;
+          const mergedDraft = { ...draft, ...sanitizedUpdates, symbol: newSymbol };
+          const validation = validateDraft(mergedDraft);
+          return {
+            ...mergedDraft,
+            status: validation.status,
+            errors: validation.errors,
+            warnings: validation.warnings,
+            duplicateOfId: undefined,
+            duplicateOfLineNumber: undefined,
+          } as DraftActivity;
+        });
+        dispatch(setDraftActivities(nextDrafts));
+        void validateDraftsWithBackend(nextDrafts);
+
+        if (mapping) {
+          const updatedMapping = {
+            ...mapping,
+            symbolMappings: { ...mapping.symbolMappings, [originalSymbol]: newSymbol },
+          };
+          dispatch(setMapping(updatedMapping));
+          if (accountId) {
+            saveAccountImportMapping({ ...updatedMapping, accountId }).catch((err) =>
+              logger.error(`Failed to save symbol mapping: ${err}`),
+            );
+          }
+        }
+        return;
+      }
+
+      const mergedDraft = { ...currentDraft, ...sanitizedUpdates };
+      // Re-validate the merged draft
+      const validation = validateDraft(mergedDraft);
+      // Don't override status if it was explicitly skipped.
+      const shouldRevalidateStatus = currentDraft.status !== "skipped";
+      dispatch(
+        updateDraft(rowIndex, {
+          ...sanitizedUpdates,
+          ...(shouldRevalidateStatus
+            ? {
+                status: validation.status,
+                errors: validation.errors,
+                warnings: validation.warnings,
+                duplicateOfId: undefined,
+                duplicateOfLineNumber: undefined,
+              }
+            : {}),
+        }),
+      );
     },
-    [dispatch, draftActivities],
+    [dispatch, draftActivities, mapping, accountId, validateDraftsWithBackend],
   );
 
   const handleBulkSkip = useCallback(
