@@ -476,9 +476,16 @@ impl YahooProvider {
         &self,
         encoded_query: &str,
     ) -> Result<Vec<SearchResult>, MarketDataError> {
+        // Authenticate the search request with Yahoo's crumb + cookie. Unauthenticated
+        // search requests are frequently throttled to empty responses from datacenter
+        // IPs (e.g., cloud hosts), which made ticker lookups like "GOOG" return no
+        // matches even though the same query works from a browser.
+        let crumb = self.ensure_crumb().await?;
+
         let url = format!(
-            "https://query2.finance.yahoo.com/v1/finance/search?q={}",
-            encoded_query
+            "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=10&newsCount=0&crumb={}",
+            encoded_query,
+            encode(&crumb.crumb)
         );
 
         let payload = reqwest::Client::new()
@@ -487,6 +494,7 @@ impl YahooProvider {
                 header::USER_AGENT,
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             )
+            .header(header::COOKIE, &crumb.cookie)
             .send()
             .await
             .map_err(|e| MarketDataError::ProviderError {
@@ -1030,6 +1038,21 @@ impl MarketDataProvider for YahooProvider {
         match self.search_raw_with_currency(&encoded_query).await {
             Ok(results) if !results.is_empty() => return Ok(results),
             Ok(_) => debug!(
+                "Yahoo raw search returned no quotes for '{}', retrying with fresh crumb",
+                query
+            ),
+            Err(e) => debug!(
+                "Yahoo raw search failed for '{}': {}. Retrying with fresh crumb",
+                query, e
+            ),
+        }
+
+        // A stale crumb/cookie yields empty or failed responses; refresh and retry once
+        // before falling back to the connector API.
+        self.clear_crumb();
+        match self.search_raw_with_currency(&encoded_query).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => debug!(
                 "Yahoo raw search returned no quotes for '{}', falling back to connector API",
                 query
             ),
@@ -1041,7 +1064,7 @@ impl MarketDataProvider for YahooProvider {
 
         let result = self
             .connector
-            .search_ticker(&encoded_query)
+            .search_ticker(query)
             .await
             .map_err(|e| MarketDataError::ProviderError {
                 provider: "YAHOO".to_string(),
