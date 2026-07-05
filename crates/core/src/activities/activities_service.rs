@@ -2361,18 +2361,42 @@ impl ActivityServiceTrait for ActivityService {
             let is_equity = effective_kind == AssetKind::Investment
                 && effective_instrument_type.as_ref() == Some(&InstrumentType::Equity);
             if is_equity && resolved_mic.is_none() && !is_manual_quote && existing_id.is_none() {
-                activity.is_valid = false;
-                let mut errors = std::collections::HashMap::new();
-                errors.insert(
-                    "symbol".to_string(),
-                    vec![format!(
-                        "Could not find '{}' in market data. Please search for the correct ticker symbol.",
-                        &activity.symbol
-                    )],
-                );
-                activity.errors = Some(errors);
-                activities_with_status.push(activity);
-                continue;
+                // Distinguish a symbol the user has explicitly resolved (via the
+                // symbol search, which fills in the instrument name) from a raw,
+                // still-unrecognized CSV symbol. When the user has resolved it we
+                // must not block the import just because the exchange MIC could
+                // not be confirmed right now (e.g. the market-data provider is
+                // temporarily throttled): the MIC is best-effort at import time
+                // and is re-resolved during portfolio sync. This mirrors the
+                // apply path (`validate_import_activities_for_apply`), which only
+                // warns in this case. Unresolved symbols still surface a blocking
+                // error so they appear in the "unrecognized symbols" panel.
+                let user_resolved = activity
+                    .symbol_name
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|name| !name.is_empty());
+
+                if user_resolved {
+                    Self::add_activity_warning(
+                        &mut activity,
+                        "exchangeMic",
+                        "Exchange could not be confirmed for this symbol. It will be resolved during sync; verify the ticker if quotes do not load.",
+                    );
+                } else {
+                    activity.is_valid = false;
+                    let mut errors = std::collections::HashMap::new();
+                    errors.insert(
+                        "symbol".to_string(),
+                        vec![format!(
+                            "Could not find '{}' in market data. Please search for the correct ticker symbol.",
+                            &activity.symbol
+                        )],
+                    );
+                    activity.errors = Some(errors);
+                    activities_with_status.push(activity);
+                    continue;
+                }
             }
 
             // Store resolved data back on activity for import step

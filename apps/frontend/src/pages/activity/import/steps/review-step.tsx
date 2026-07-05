@@ -776,6 +776,7 @@ export function ReviewStep() {
                 date: draft.activityDate || "",
                 symbol: draft.symbol || "",
                 exchangeMic: draft.exchangeMic,
+                symbolName: draft.symbolName,
                 quoteCcy: draft.quoteCcy,
                 instrumentType: draft.instrumentType,
                 quoteMode: draft.quoteMode,
