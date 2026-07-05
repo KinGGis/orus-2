@@ -146,31 +146,28 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             .database_url
             .as_deref()
             .expect("postgres backend validated during config parsing");
+
         let data_root_path = std::path::Path::new(&config.db_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let resolved_secret_path = std::env::var("WF_SECRET_FILE")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_root_path.join("secrets.json"));
-        let file_store = build_secret_store(
-            resolved_secret_path.clone(),
-            Some(config.secrets_encryption_key),
-            Some(&config.raw_secret_key),
-        )
-        .map_err(anyhow::Error::new)?;
-        let secret_store: Arc<dyn SecretStore> = Arc::new(file_store);
-        std::env::set_var(
-            "WF_SECRET_FILE",
-            resolved_secret_path.to_string_lossy().to_string(),
-        );
 
         tracing::info!(
             "WF_STORAGE_BACKEND=postgres selected; bootstrapping PostgreSQL-backed services"
         );
         wealthfolio_storage_postgres::run_migrations(database_url)?;
         let pool = wealthfolio_storage_postgres::create_pool(database_url)?;
+
+        // Persist secrets in Postgres so provider API keys (Finnhub, ...) and
+        // other credentials survive redeployments even when the server has no
+        // persistent disk. Values are encrypted at rest with WF_SECRET_KEY.
+        let secret_store: Arc<dyn SecretStore> = Arc::new(
+            wealthfolio_storage_postgres::secrets::PostgresSecretStore::new(
+                pool.clone(),
+                Some(config.secrets_encryption_key),
+            ),
+        );
+
         let domain_event_sink = Arc::new(WebDomainEventSink::new());
 
         let fx_repo: Arc<dyn wealthfolio_core::fx::FxRepositoryTrait> = Arc::new(

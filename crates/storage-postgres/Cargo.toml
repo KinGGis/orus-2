@@ -32,5 +32,10 @@ diesel = { version = "2.2", features = ["postgres", "chrono", "r2d2", "numeric",
 diesel_migrations = "2.2"
 r2d2 = { workspace = true }
 
+# Secret encryption at rest (parity with the file-based secret store)
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+base64 = "0.21"
+
 [lints]
 workspace = true

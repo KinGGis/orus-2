@@ -36,6 +36,7 @@ pub mod portfolio;
 pub mod revolut;
 pub mod schema;
 pub mod settings;
+pub mod secrets;
 pub mod sync;
 pub mod system_accounts;
 pub mod taxonomies;

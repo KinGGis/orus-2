@@ -333,6 +333,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    wf_secrets (secret_key) {
+        secret_key -> Text,
+        secret_value -> Text,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     wf_health_issue_dismissals (issue_id) {
         issue_id -> Text,
         dismissed_at -> Timestamptz,
@@ -555,6 +563,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     wf_revolut_auth_tokens,
     wf_revolut_sync_log,
     wf_revolut_transactions,
+    wf_secrets,
     wf_sync_applied_events,
     wf_sync_cursor,
     wf_sync_device_config,
