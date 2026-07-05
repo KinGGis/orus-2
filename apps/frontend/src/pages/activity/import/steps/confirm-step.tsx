@@ -120,6 +120,7 @@ function draftToActivityImport(draft: DraftActivity): ActivityImport {
     quoteCcy: draft.quoteCcy,
     instrumentType: draft.instrumentType,
     quoteMode: draft.quoteMode,
+    symbolName: draft.symbolName,
     errors: draft.errors,
     isValid: draft.status === "valid" || draft.status === "warning",
     lineNumber: draft.rowIndex + 1,
