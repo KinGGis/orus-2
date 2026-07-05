@@ -129,6 +129,7 @@ pub trait AssetServiceTrait: Send + Sync {
         instrument_type: Option<&InstrumentType>,
         quote_mode: Option<QuoteMode>,
         requested_quote_ccy: Option<&str>,
+        require_exchange_mic: bool,
     ) -> Result<()> {
         let symbol_id = symbol_id.map(str::trim).filter(|s| !s.is_empty());
         let is_non_security = matches!(
@@ -152,7 +153,12 @@ pub trait AssetServiceTrait: Send + Sync {
             .into());
         }
 
-        if is_equity && !is_manual_quote && exchange_mic.is_none() && symbol_id.is_none() {
+        if is_equity
+            && require_exchange_mic
+            && !is_manual_quote
+            && exchange_mic.is_none()
+            && symbol_id.is_none()
+        {
             let has_existing_without_mic = self.get_assets().ok().is_some_and(|assets| {
                 let upper_symbol = symbol.to_uppercase();
                 assets.into_iter().any(|asset| {

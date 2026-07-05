@@ -981,6 +981,7 @@ impl ActivityService {
                     effective_instrument_type.as_ref(),
                     parsed_quote_mode,
                     quote_ccy_input.as_deref(),
+                    true,
                 )?;
             }
             None if activity
@@ -1362,6 +1363,7 @@ impl ActivityService {
                     effective_instrument_type.as_ref(),
                     parsed_quote_mode,
                     quote_ccy_input.as_deref(),
+                    true,
                 )?;
             }
             None if activity
@@ -1739,6 +1741,10 @@ impl ActivityService {
         let quote_lookup_symbol = normalized_symbol.clone();
 
         if !allow_live_resolution {
+            // Bulk CSV imports defer exchange-MIC resolution to the sync step, mirroring
+            // the import pre-check which only warns on a missing MIC. The interactive
+            // Save flow still enforces a MIC for market equities.
+            let require_exchange_mic = matches!(mode, PreparationMode::Save);
             self.asset_service.validate_persisted_symbol_metadata(
                 normalized_symbol.as_str(),
                 activity.get_symbol_id(),
@@ -1746,6 +1752,7 @@ impl ActivityService {
                 instrument_type.as_ref(),
                 quote_mode,
                 quote_ccy_input.as_deref(),
+                require_exchange_mic,
             )?;
         }
 
