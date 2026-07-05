@@ -2383,6 +2383,21 @@ impl ActivityServiceTrait for ActivityService {
                         "exchangeMic",
                         "Exchange could not be confirmed for this symbol. It will be resolved during sync; verify the ticker if quotes do not load.",
                     );
+                    // The exchange MIC is unresolved, most likely because the
+                    // market-data provider is temporarily unavailable. Do NOT fall
+                    // through to the per-activity provider currency lookup below:
+                    // resolving many such symbols sequentially would issue one slow
+                    // provider request each and can exceed the server request
+                    // timeout. Seed the quote currency from the row/account currency
+                    // instead; the precise quote currency is resolved during sync.
+                    if Self::normalize_quote_ccy(activity.quote_ccy.as_deref()).is_none() {
+                        let fallback_ccy = if activity.currency.trim().is_empty() {
+                            account_currency.clone()
+                        } else {
+                            activity.currency.trim().to_string()
+                        };
+                        activity.quote_ccy = Some(fallback_ccy);
+                    }
                 } else {
                     activity.is_valid = false;
                     let mut errors = std::collections::HashMap::new();
