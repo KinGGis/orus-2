@@ -22,7 +22,7 @@ use wealthfolio_core::assets::AssetMetadata;
 use wealthfolio_core::portfolio::snapshot::{
     AccountStateSnapshot, Position, SnapshotRecalcMode, SnapshotSource,
 };
-use wealthfolio_core::portfolio::valuation::{ValuationRecalcMode, ValuationRepositoryTrait};
+use wealthfolio_core::portfolio::valuation::ValuationRecalcMode;
 use wealthfolio_core::quotes::SyncMode;
 use wealthfolio_core::snaptrade::{self, SnapTradeAccount};
 use std::collections::HashSet;
@@ -111,10 +111,29 @@ async fn register_user(
         return Err(ApiError::BadRequest("SnapTrade user already registered. Delete user first.".to_string()));
     }
 
-    // Register with SnapTrade API
-    let user_secret = snaptrade::register_user(config, &payload.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("SnapTrade registration failed: {}", e)))?;
+    // Register with SnapTrade API. When no local secret exists but the SnapTrade
+    // user was previously registered (e.g. the ephemeral secret store was wiped on a
+    // redeploy), the initial registration fails because the userId already exists on
+    // SnapTrade's side. In that case, delete the stale remote user and retry once so
+    // the account can recover a fresh, persistent user secret. This is safe here: we
+    // only reach this point after confirming no working local credentials exist, so
+    // there is no functional connection to preserve.
+    let user_secret = match snaptrade::register_user(config, &payload.user_id).await {
+        Ok(secret) => secret,
+        Err(first_err) => {
+            tracing::warn!(
+                "SnapTrade registration failed ({}); deleting any stale remote user '{}' and retrying",
+                first_err,
+                payload.user_id
+            );
+            if let Err(e) = snaptrade::delete_snaptrade_user(config, &payload.user_id).await {
+                tracing::warn!("Failed to delete stale SnapTrade user before retry: {}", e);
+            }
+            snaptrade::register_user(config, &payload.user_id)
+                .await
+                .map_err(|e| ApiError::Internal(format!("SnapTrade registration failed: {}", e)))?
+        }
+    };
 
     // Store credentials in secret_store
     state.secret_store.set_secret(SNAPTRADE_USER_ID_KEY, &user_secret.user_id)?;
