@@ -417,6 +417,10 @@ async fn sync_snaptrade(
     // 6. Build ActivityUpsert list
     let mut activity_upserts: Vec<ActivityUpsert> = Vec::new();
     let mut skipped_count: usize = 0;
+    // Cache resolved asset UUIDs by symbol. Activities reference assets by their
+    // internal id (a UUID in the Postgres backend), not by their ticker, so each
+    // symbol must be resolved to (or created as) an asset before upsert.
+    let mut activity_asset_id_cache: HashMap<String, String> = HashMap::new();
 
     for st_act in &st_activities {
         // Get WF account ID from mapping
@@ -455,10 +459,54 @@ async fn sync_snaptrade(
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        // Resolve the ticker to an internal asset id (UUID). Symbol-less activities
+        // (deposits, withdrawals, fees, ...) legitimately have no asset.
+        let asset_id = match st_act
+            .symbol
+            .as_ref()
+            .and_then(|s| s.symbol.clone())
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(symbol) => {
+                if let Some(cached) = activity_asset_id_cache.get(&symbol) {
+                    Some(cached.clone())
+                } else {
+                    let currency = st_act.currency.as_ref().and_then(|c| c.code.clone());
+                    let metadata = AssetMetadata {
+                        instrument_symbol: Some(symbol.clone()),
+                        display_code: Some(symbol.clone()),
+                        requested_quote_ccy: currency.clone(),
+                        ..Default::default()
+                    };
+                    match state
+                        .asset_service
+                        .get_or_create_minimal_asset(&symbol, currency, Some(metadata), None)
+                        .await
+                    {
+                        Ok(asset) => {
+                            activity_asset_id_cache.insert(symbol.clone(), asset.id.clone());
+                            Some(asset.id)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "SnapTrade activity {} skipped: failed to resolve asset for symbol {}: {}",
+                                st_act.id.as_deref().unwrap_or("unknown"),
+                                symbol,
+                                e
+                            );
+                            skipped_count += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            None => None,
+        };
+
         let activity_upsert = ActivityUpsert {
             id: activity_id.clone(),
             account_id: wf_account_id,
-            asset_id: st_act.symbol.as_ref().and_then(|s| s.symbol.clone()),
+            asset_id,
             activity_type: snaptrade::map_snaptrade_action(
                 st_act.action.as_deref().unwrap_or("OTHER"),
             )
