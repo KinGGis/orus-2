@@ -160,47 +160,14 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 query = query.filter(wf_assets::instrument_type.eq_any(instrument_types));
             }
 
-            if let Some(ref sort) = sort {
-                match sort.id.as_str() {
-                    "date" => {
-                        if sort.desc {
-                            query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
-                        } else {
-                            query = query.order((wf_activities::activity_date.asc(), wf_activities::created_at.asc()));
-                        }
-                    }
-                    "activityType" => {
-                        query = if sort.desc {
-                            query.order(wf_activities::activity_type.desc())
-                        } else {
-                            query.order(wf_activities::activity_type.asc())
-                        };
-                    }
-                    "assetSymbol" => {
-                        query = if sort.desc {
-                            query.order(wf_activities::asset_id.desc())
-                        } else {
-                            query.order(wf_activities::asset_id.asc())
-                        };
-                    }
-                    "accountName" => {
-                        query = if sort.desc {
-                            query.order(wf_accounts::name.desc())
-                        } else {
-                            query.order(wf_accounts::name.asc())
-                        };
-                    }
-                    _ => {
-                        query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
-                    }
-                }
-            } else {
-                query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
-            }
-
             query
         };
 
+        // NOTE: the ordering must NOT be applied to the base query, because the
+        // same builder is reused for the COUNT(*) query. In Postgres an
+        // `ORDER BY <non-aggregated column>` combined with an aggregate select
+        // triggers "column ... must appear in the GROUP BY clause". The sort is
+        // therefore applied only to the data-fetching query below.
         let total_row_count = create_base_query()
             .count()
             .get_result::<i64>(&mut conn)
@@ -239,7 +206,49 @@ impl ActivityRepositoryTrait for ActivityRepository {
             Option<serde_json::Value>,
         );
 
-        let rows = create_base_query()
+        let sorted_query = {
+            let mut query = create_base_query();
+            if let Some(ref sort) = sort {
+                match sort.id.as_str() {
+                    "date" => {
+                        if sort.desc {
+                            query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
+                        } else {
+                            query = query.order((wf_activities::activity_date.asc(), wf_activities::created_at.asc()));
+                        }
+                    }
+                    "activityType" => {
+                        query = if sort.desc {
+                            query.order(wf_activities::activity_type.desc())
+                        } else {
+                            query.order(wf_activities::activity_type.asc())
+                        };
+                    }
+                    "assetSymbol" => {
+                        query = if sort.desc {
+                            query.order(wf_activities::asset_id.desc())
+                        } else {
+                            query.order(wf_activities::asset_id.asc())
+                        };
+                    }
+                    "accountName" => {
+                        query = if sort.desc {
+                            query.order(wf_accounts::name.desc())
+                        } else {
+                            query.order(wf_accounts::name.asc())
+                        };
+                    }
+                    _ => {
+                        query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
+                    }
+                }
+            } else {
+                query = query.order((wf_activities::activity_date.desc(), wf_activities::created_at.asc()));
+            }
+            query
+        };
+
+        let rows = sorted_query
             .select((
                 wf_activities::id,
                 wf_activities::account_id,

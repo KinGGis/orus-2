@@ -76,8 +76,20 @@ impl TryFrom<&AccountStateSnapshot> for AccountStateSnapshotDB {
 
         let calculated_at = DateTime::<Utc>::from_naive_utc_and_offset(domain.calculated_at, Utc);
 
+        // Postgres stores the snapshot id as a UUID. Domain ids may be
+        // non-UUID stable identifiers (e.g. the synthetic "TOTAL" portfolio
+        // snapshot). Fall back to the deterministic UUID derived from
+        // account_id + snapshot_date whenever the provided id is not a UUID so
+        // upserts still target a stable row.
+        let snapshot_id = Uuid::parse_str(&stable_id).or_else(|_| {
+            Uuid::parse_str(&AccountStateSnapshot::stable_id(
+                &domain.account_id,
+                domain.snapshot_date,
+            ))
+        });
+
         Ok(Self {
-            id: Uuid::parse_str(&stable_id).map_err(|err| {
+            id: snapshot_id.map_err(|err| {
                 Error::Validation(ValidationError::InvalidInput(format!(
                     "Invalid snapshot id UUID: {err}"
                 )))
