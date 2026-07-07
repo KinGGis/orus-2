@@ -11,7 +11,7 @@ use crate::db::{get_connection, DbPool};
 use crate::errors::StorageError;
 use crate::schema::{wf_activities, wf_assets, wf_quotes};
 use wealthfolio_core::assets::{Asset, AssetRepositoryTrait, NewAsset, UpdateAssetProfile};
-use wealthfolio_core::errors::{Result, ValidationError};
+use wealthfolio_core::errors::{DatabaseError, Result, ValidationError};
 use wealthfolio_core::Error;
 
 pub struct AssetRepository {
@@ -32,7 +32,20 @@ impl AssetRepository {
     }
 
     pub fn get_by_id_impl(&self, asset_id: &str) -> Result<Asset> {
-        let parsed_id = Self::parse_asset_id(asset_id)?;
+        // A non-UUID asset_id (e.g. a raw ticker symbol passed by
+        // get_or_create_minimal_asset during broker sync) can never match a
+        // Postgres UUID primary key. Return NotFound so callers treat it as
+        // "asset absent" and proceed to create it, mirroring the SQLite backend
+        // where asset ids are free-form text. Returning a validation error here
+        // instead caused every securities symbol to be skipped during sync.
+        let parsed_id = match Uuid::parse_str(asset_id) {
+            Ok(id) => id,
+            Err(_) => {
+                return Err(Error::Database(DatabaseError::NotFound(format!(
+                    "Asset '{asset_id}' not found"
+                ))))
+            }
+        };
         let mut conn = get_connection(&self.pool)?;
         let result = wf_assets::table
             .select(AssetDB::as_select())
