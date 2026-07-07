@@ -323,7 +323,14 @@ async fn run_portfolio_job(
                 let err_msg = err.to_string();
                 tracing::error!("Market data sync failed: {}", err_msg);
                 event_bus.publish(ServerEvent::with_payload(MARKET_SYNC_ERROR, json!(err_msg)));
-                return;
+                // Do NOT abort the whole job: a market-data sync failure (e.g. the
+                // quote provider is unreachable) must not prevent the portfolio
+                // snapshot recalculation. Positions and quantities are derived from
+                // activities and can be rebuilt without fresh quotes; only their
+                // market valuation would be stale. Continue to the recalc below.
+                tracing::warn!(
+                    "Continuing portfolio recalculation despite market data sync failure"
+                );
             }
         }
     } else {

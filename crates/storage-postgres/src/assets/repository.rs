@@ -71,10 +71,17 @@ impl AssetRepository {
             return Ok(Vec::new());
         }
 
-        let parsed_ids = asset_ids
+        // Best-effort lookup: silently skip ids that are not valid UUIDs instead
+        // of failing the whole batch. A single non-UUID id (e.g. a stray ticker)
+        // must not wipe out asset details for every holding, otherwise the
+        // holdings view drops all positions while cash balances still show.
+        let parsed_ids: Vec<Uuid> = asset_ids
             .iter()
-            .map(|value| Self::parse_asset_id(value))
-            .collect::<Result<Vec<_>>>()?;
+            .filter_map(|value| Uuid::parse_str(value).ok())
+            .collect();
+        if parsed_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut conn = get_connection(&self.pool)?;
         let results = wf_assets::table
             .filter(wf_assets::id.eq_any(parsed_ids))
