@@ -320,6 +320,24 @@ struct SyncDiagnosticResponse {
     account_map: HashMap<String, String>,
     mismatched_ids: Vec<String>,
     date_range: DateRange,
+    account_diagnostics: Vec<AccountDiagnostic>,
+}
+
+/// Per-account ground-truth diagnostic (DB state, not SnapTrade API state).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountDiagnostic {
+    wf_account_id: String,
+    activity_count: usize,
+    activity_type_counts: HashMap<String, usize>,
+    activities_with_asset_id: usize,
+    activities_without_asset_id: usize,
+    buy_sell_count: usize,
+    latest_snapshot_date: Option<String>,
+    latest_snapshot_source: Option<String>,
+    latest_snapshot_positions_count: usize,
+    latest_snapshot_position_asset_ids_sample: Vec<String>,
+    latest_snapshot_cash_currencies: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -950,6 +968,91 @@ async fn sync_diagnostic(
         .cloned()
         .collect();
 
+    // 8. Per-account DB ground-truth diagnostics (activities + latest snapshot).
+    let today_date = chrono::Utc::now().date_naive();
+    let mut wf_account_ids: Vec<String> = account_map.values().cloned().collect();
+    wf_account_ids.sort();
+    wf_account_ids.dedup();
+
+    let mut account_diagnostics: Vec<AccountDiagnostic> = Vec::new();
+    for wf_account_id in &wf_account_ids {
+        let activities = state
+            .activity_service
+            .get_activities_by_account_id(wf_account_id)
+            .unwrap_or_default();
+
+        let mut activity_type_counts: HashMap<String, usize> = HashMap::new();
+        let mut activities_with_asset_id = 0usize;
+        let mut activities_without_asset_id = 0usize;
+        let mut buy_sell_count = 0usize;
+        for activity in &activities {
+            *activity_type_counts
+                .entry(activity.activity_type.clone())
+                .or_insert(0) += 1;
+            let has_asset = activity
+                .asset_id
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if has_asset {
+                activities_with_asset_id += 1;
+            } else {
+                activities_without_asset_id += 1;
+            }
+            let upper = activity.activity_type.to_uppercase();
+            if upper == "BUY" || upper == "SELL" {
+                buy_sell_count += 1;
+            }
+        }
+
+        let latest_snapshot = state
+            .snapshot_repository
+            .get_latest_snapshot_before_date(wf_account_id, today_date)
+            .ok()
+            .flatten();
+
+        let (
+            latest_snapshot_date,
+            latest_snapshot_source,
+            latest_snapshot_positions_count,
+            latest_snapshot_position_asset_ids_sample,
+            latest_snapshot_cash_currencies,
+        ) = match latest_snapshot {
+            Some(snap) => {
+                let non_zero: Vec<String> = snap
+                    .positions
+                    .values()
+                    .filter(|p| p.quantity != Decimal::ZERO)
+                    .map(|p| p.asset_id.clone())
+                    .collect();
+                let sample: Vec<String> = non_zero.iter().take(5).cloned().collect();
+                let cash: Vec<String> = snap.cash_balances.keys().cloned().collect();
+                (
+                    Some(snap.snapshot_date.to_string()),
+                    Some(format!("{:?}", snap.source)),
+                    non_zero.len(),
+                    sample,
+                    cash,
+                )
+            }
+            None => (None, None, 0, Vec::new(), Vec::new()),
+        };
+
+        account_diagnostics.push(AccountDiagnostic {
+            wf_account_id: wf_account_id.clone(),
+            activity_count: activities.len(),
+            activity_type_counts,
+            activities_with_asset_id,
+            activities_without_asset_id,
+            buy_sell_count,
+            latest_snapshot_date,
+            latest_snapshot_source,
+            latest_snapshot_positions_count,
+            latest_snapshot_position_asset_ids_sample,
+            latest_snapshot_cash_currencies,
+        });
+    }
+
     Ok(Json(SyncDiagnosticResponse {
         snaptrade_accounts,
         raw_activities_count: st_activities.len(),
@@ -960,6 +1063,7 @@ async fn sync_diagnostic(
             start,
             end: today,
         },
+        account_diagnostics,
     }))
 }
 
