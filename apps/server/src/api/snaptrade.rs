@@ -337,6 +337,11 @@ struct AccountDiagnostic {
     latest_snapshot_source: Option<String>,
     latest_snapshot_positions_count: usize,
     latest_snapshot_position_asset_ids_sample: Vec<String>,
+    /// How many of the latest snapshot's position asset_ids actually resolve to an
+    /// existing asset row (via the same lookup the holdings view uses). If this is
+    /// less than latest_snapshot_positions_count, positions are being dropped at
+    /// display time because their asset does not exist.
+    latest_snapshot_position_assets_resolved: usize,
     latest_snapshot_cash_currencies: Vec<String>,
 }
 
@@ -1047,6 +1052,7 @@ async fn sync_diagnostic(
             latest_snapshot_source,
             latest_snapshot_positions_count,
             latest_snapshot_position_asset_ids_sample,
+            latest_snapshot_position_assets_resolved,
             latest_snapshot_cash_currencies,
         ) = match latest_snapshot {
             Some(snap) => {
@@ -1058,15 +1064,26 @@ async fn sync_diagnostic(
                     .collect();
                 let sample: Vec<String> = non_zero.iter().take(5).cloned().collect();
                 let cash: Vec<String> = snap.cash_balances.keys().cloned().collect();
+                let resolved = if non_zero.is_empty() {
+                    0
+                } else {
+                    state
+                        .asset_service
+                        .get_assets_by_asset_ids(&non_zero)
+                        .await
+                        .map(|assets| assets.len())
+                        .unwrap_or(0)
+                };
                 (
                     Some(snap.snapshot_date.to_string()),
                     Some(format!("{:?}", snap.source)),
                     non_zero.len(),
                     sample,
+                    resolved,
                     cash,
                 )
             }
-            None => (None, None, 0, Vec::new(), Vec::new()),
+            None => (None, None, 0, Vec::new(), 0, Vec::new()),
         };
 
         account_diagnostics.push(AccountDiagnostic {
@@ -1080,6 +1097,7 @@ async fn sync_diagnostic(
             latest_snapshot_source,
             latest_snapshot_positions_count,
             latest_snapshot_position_asset_ids_sample,
+            latest_snapshot_position_assets_resolved,
             latest_snapshot_cash_currencies,
         });
     }
