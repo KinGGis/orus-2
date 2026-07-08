@@ -788,12 +788,25 @@ async fn sync_snaptrade(
             source: SnapshotSource::BrokerImported,
         };
 
-        snapshots_to_save.push(snapshot);
+        // Only persist a BrokerImported anchor that actually carries positions.
+        // These accounts are Transactions-mode, so holdings are derived from the
+        // imported activities. A positions-less (cash-only) anchor — e.g. IBKR via
+        // SnapTrade returns only cash balances — would otherwise shadow the
+        // activity-derived holdings: overwrite_all_snapshots_for_account preserves
+        // broker anchors on their date and drops any calculated frame sharing that
+        // date, leaving the latest snapshot at 0 positions.
+        if snapshot.positions.is_empty() {
+            tracing::info!(
+                "Skipping positions-less broker anchor for account {} (holdings derived from activities)",
+                wf_account_id
+            );
+        } else {
+            snapshots_to_save.push(snapshot);
+        }
     }
 
     // Save all snapshots
     let holdings_synced = snapshots_to_save.len();
-    let synced_account_ids: Vec<String> = snapshots_to_save.iter().map(|s| s.account_id.clone()).collect();
 
     // All WF accounts mapped from SnapTrade this run (deduplicated). Positions for
     // Transactions-mode accounts are derived from activities, so we must recompute
@@ -817,26 +830,28 @@ async fn sync_snaptrade(
             total_positions_count,
             total_cash_count
         );
+    }
 
-        // Recompute per-account holdings from the imported activities (Full) BEFORE
-        // aggregating the TOTAL. This materializes positions from BUY/SELL activities
-        // and OVERWRITES the positions-less broker anchor, so holdings/insights show
-        // securities instead of only cash. Position quantities do not need quotes;
-        // only their valuation does (handled by the quote/valuation steps below).
-        if !recalc_account_ids.is_empty() {
-            if let Err(e) = state
-                .snapshot_service
-                .recalculate_holdings_snapshots(
-                    Some(&recalc_account_ids),
-                    SnapshotRecalcMode::Full,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to recalculate per-account holdings from activities after SnapTrade sync: {}",
-                    e
-                );
-            }
+    // Recompute per-account holdings from the imported activities and refresh
+    // valuations for EVERY mapped account, whether or not a broker anchor was
+    // saved above. For Transactions-mode accounts this materializes positions from
+    // BUY/SELL activities; the calculated frame at today then becomes the latest
+    // snapshot (no positions-less anchor shadows it), so holdings/insights show
+    // securities. Position quantities do not need quotes; only their valuation
+    // does (handled by the quote/valuation steps below).
+    if !recalc_account_ids.is_empty() {
+        if let Err(e) = state
+            .snapshot_service
+            .recalculate_holdings_snapshots(
+                Some(&recalc_account_ids),
+                SnapshotRecalcMode::Full,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to recalculate per-account holdings from activities after SnapTrade sync: {}",
+                e
+            );
         }
 
         // Recalculate TOTAL portfolio snapshots to include new holdings
@@ -879,8 +894,8 @@ async fn sync_snaptrade(
             }
         }
 
-        // Calculate valuations for each synced account
-        for account_id in &synced_account_ids {
+        // Calculate valuations for each mapped account
+        for account_id in &recalc_account_ids {
             if let Err(e) = state
                 .valuation_service
                 .calculate_valuation_history(account_id, ValuationRecalcMode::Full)
@@ -903,7 +918,7 @@ async fn sync_snaptrade(
             tracing::warn!("Failed to calculate TOTAL valuations after SnapTrade sync: {}", e);
         }
 
-        tracing::info!("Valuation calculations completed for {} accounts", synced_account_ids.len());
+        tracing::info!("Valuation calculations completed for {} accounts", recalc_account_ids.len());
     }
 
     Ok(Json(SnapTradeSyncResponse {
