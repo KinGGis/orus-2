@@ -789,7 +789,17 @@ async fn sync_snaptrade(
     // Save all snapshots
     let holdings_synced = snapshots_to_save.len();
     let synced_account_ids: Vec<String> = snapshots_to_save.iter().map(|s| s.account_id.clone()).collect();
-    
+
+    // All WF accounts mapped from SnapTrade this run (deduplicated). Positions for
+    // Transactions-mode accounts are derived from activities, so we must recompute
+    // per-account holdings from the imported activities. The broker `/holdings`
+    // anchor may contain no positions at all (e.g. IBKR via SnapTrade returns only
+    // cash balances), and that positions-less anchor would otherwise shadow the
+    // real holdings in every view.
+    let mut recalc_account_ids: Vec<String> = account_map.values().cloned().collect();
+    recalc_account_ids.sort();
+    recalc_account_ids.dedup();
+
     if !snapshots_to_save.is_empty() {
         state
             .snapshot_repository
@@ -802,6 +812,27 @@ async fn sync_snaptrade(
             total_positions_count,
             total_cash_count
         );
+
+        // Recompute per-account holdings from the imported activities (Full) BEFORE
+        // aggregating the TOTAL. This materializes positions from BUY/SELL activities
+        // and OVERWRITES the positions-less broker anchor, so holdings/insights show
+        // securities instead of only cash. Position quantities do not need quotes;
+        // only their valuation does (handled by the quote/valuation steps below).
+        if !recalc_account_ids.is_empty() {
+            if let Err(e) = state
+                .snapshot_service
+                .recalculate_holdings_snapshots(
+                    Some(&recalc_account_ids),
+                    SnapshotRecalcMode::Full,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to recalculate per-account holdings from activities after SnapTrade sync: {}",
+                    e
+                );
+            }
+        }
 
         // Recalculate TOTAL portfolio snapshots to include new holdings
         if let Err(e) = state
