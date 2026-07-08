@@ -592,6 +592,11 @@ async fn sync_snaptrade(
     let mut total_cash_count: usize = 0;
     let mut all_asset_ids: HashSet<String> = HashSet::new();
     let mut fx_pairs: HashSet<(String, String)> = HashSet::new();
+    // Accounts whose broker /holdings snapshot carried NO positions (e.g. IBKR via
+    // SnapTrade returns only cash balances). For these, holdings must come purely
+    // from activities, so any stale BrokerImported anchor must be wiped before the
+    // recalc (see the clean-slate step below).
+    let mut accounts_without_broker_positions: HashSet<String> = HashSet::new();
     let base_currency = state.base_currency.read().unwrap().clone();
 
     for holding in &st_holdings {
@@ -796,6 +801,7 @@ async fn sync_snaptrade(
         // broker anchors on their date and drops any calculated frame sharing that
         // date, leaving the latest snapshot at 0 positions.
         if snapshot.positions.is_empty() {
+            accounts_without_broker_positions.insert(wf_account_id.clone());
             tracing::info!(
                 "Skipping positions-less broker anchor for account {} (holdings derived from activities)",
                 wf_account_id
@@ -840,6 +846,36 @@ async fn sync_snaptrade(
     // securities. Position quantities do not need quotes; only their valuation
     // does (handled by the quote/valuation steps below).
     if !recalc_account_ids.is_empty() {
+        // Clean slate for accounts with a positions-less broker anchor: remove ALL
+        // existing snapshots (any source) for them before recomputing. The broker
+        // anchor is normally protected from recalc — overwrite_all_snapshots_for_account
+        // and delete_snapshots_by_account_ids only touch source=CALCULATED — so a
+        // stale cash-only BrokerImported anchor persisted by an earlier sync would
+        // keep shadowing the activity-derived holdings. delete_snapshots_for_account_in_range
+        // deletes regardless of source, giving the recalc a clean canvas.
+        let wipe_start = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap_or_else(|| today_date - chrono::Duration::days(36500));
+        let wipe_end = today_date + chrono::Duration::days(1);
+        for account_id in &recalc_account_ids {
+            if accounts_without_broker_positions.contains(account_id) {
+                if let Err(e) = state
+                    .snapshot_repository
+                    .delete_snapshots_for_account_in_range(account_id, wipe_start, wipe_end)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to clear stale snapshots for account {} before recalc: {}",
+                        account_id, e
+                    );
+                } else {
+                    tracing::info!(
+                        "Cleared stale snapshots for account {} (positions-less broker anchor) before activity recalc",
+                        account_id
+                    );
+                }
+            }
+        }
+
         if let Err(e) = state
             .snapshot_service
             .recalculate_holdings_snapshots(
