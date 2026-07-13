@@ -336,6 +336,15 @@ struct AccountDiagnostic {
     latest_snapshot_date: Option<String>,
     latest_snapshot_source: Option<String>,
     latest_snapshot_positions_count: usize,
+    /// Total number of position rows in the latest snapshot, INCLUDING zero-quantity
+    /// positions. If this is > 0 while latest_snapshot_positions_count (non-zero) is
+    /// 0, positions are being created but never accumulate quantity (e.g. the BUY lot
+    /// was dropped because a currency conversion failed), so every holding is filtered
+    /// out of the view.
+    latest_snapshot_raw_positions_count: usize,
+    /// Sample of up to 8 positions from the latest snapshot as "asset_id=qty@ccy",
+    /// including zero-quantity ones, to reveal whether quantities are actually zero.
+    latest_snapshot_position_quantities_sample: Vec<String>,
     latest_snapshot_position_asset_ids_sample: Vec<String>,
     /// How many of the latest snapshot's position asset_ids actually resolve to an
     /// existing asset row (via the same lookup the holdings view uses). If this is
@@ -1102,11 +1111,20 @@ async fn sync_diagnostic(
             latest_snapshot_date,
             latest_snapshot_source,
             latest_snapshot_positions_count,
+            latest_snapshot_raw_positions_count,
+            latest_snapshot_position_quantities_sample,
             latest_snapshot_position_asset_ids_sample,
             latest_snapshot_position_assets_resolved,
             latest_snapshot_cash_currencies,
         ) = match latest_snapshot {
             Some(snap) => {
+                let raw_positions_count = snap.positions.len();
+                let quantities_sample: Vec<String> = snap
+                    .positions
+                    .values()
+                    .take(8)
+                    .map(|p| format!("{}={}@{}", p.asset_id, p.quantity, p.currency))
+                    .collect();
                 let non_zero: Vec<String> = snap
                     .positions
                     .values()
@@ -1129,12 +1147,14 @@ async fn sync_diagnostic(
                     Some(snap.snapshot_date.to_string()),
                     Some(format!("{:?}", snap.source)),
                     non_zero.len(),
+                    raw_positions_count,
+                    quantities_sample,
                     sample,
                     resolved,
                     cash,
                 )
             }
-            None => (None, None, 0, Vec::new(), 0, Vec::new()),
+            None => (None, None, 0, 0, Vec::new(), Vec::new(), 0, Vec::new()),
         };
 
         account_diagnostics.push(AccountDiagnostic {
@@ -1147,6 +1167,8 @@ async fn sync_diagnostic(
             latest_snapshot_date,
             latest_snapshot_source,
             latest_snapshot_positions_count,
+            latest_snapshot_raw_positions_count,
+            latest_snapshot_position_quantities_sample,
             latest_snapshot_position_asset_ids_sample,
             latest_snapshot_position_assets_resolved,
             latest_snapshot_cash_currencies,

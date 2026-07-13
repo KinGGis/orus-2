@@ -1067,34 +1067,42 @@ impl HoldingsCalculator {
             }
         }
 
-        // Fall back to FxService
-        let converted_price = self
-            .fx_service
-            .convert_currency_for_date(
-                unit_price,
-                &activity.currency,
-                position_currency,
-                activity_date,
-            )
-            .map_err(|e| {
-                CalculatorError::CurrencyConversion(format!(
-                    "Failed to convert unit_price from {} to {}: {}",
-                    activity.currency, position_currency, e
-                ))
-            })?;
+        // Fall back to FxService. Broker-imported activities (e.g. SnapTrade) carry
+        // no per-activity fx_rate, so foreign-currency trades rely entirely on the
+        // FxService having a historical rate for the trade date. When that rate is
+        // missing we must NOT abort the whole BUY/SELL: doing so leaves a
+        // zero-quantity position and makes the security vanish from holdings
+        // entirely. Instead, book the lot with the unconverted price (the quantity
+        // is unaffected; only the cost basis is approximate), mirroring the
+        // resilient fallback already used when booking cash and cost basis.
+        let converted_price = match self.fx_service.convert_currency_for_date(
+            unit_price,
+            &activity.currency,
+            position_currency,
+            activity_date,
+        ) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    "Holdings Calc (lot cost {}): missing FX {} -> {} on {}: {}. Booking lot with unconverted price; cost basis is approximate.",
+                    activity.id, activity.currency, position_currency, activity_date, e
+                );
+                unit_price
+            }
+        };
 
-        let converted_fee = self
-            .fx_service
-            .convert_currency_for_date(fee, &activity.currency, position_currency, activity_date)
-            .map_err(|e| {
-                CalculatorError::CurrencyConversion(format!(
-                    "Failed to convert fee from {} to {}: {}",
-                    activity.currency, position_currency, e
-                ))
-            })?;
+        let converted_fee = match self.fx_service.convert_currency_for_date(
+            fee,
+            &activity.currency,
+            position_currency,
+            activity_date,
+        ) {
+            Ok(value) => value,
+            Err(_) => fee,
+        };
 
-        // Calculate implied fx_rate for audit trail
-        let fx_rate_used = if unit_price != Decimal::ZERO {
+        // Calculate implied fx_rate for audit trail (only when a real conversion happened)
+        let fx_rate_used = if unit_price != Decimal::ZERO && converted_price != unit_price {
             Some(converted_price / unit_price)
         } else {
             None
