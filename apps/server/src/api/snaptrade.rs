@@ -318,6 +318,9 @@ struct DiagnosticAccountInfo {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SyncDiagnosticResponse {
+    /// Hardcoded marker to confirm which backend build is actually live. Bump this
+    /// whenever the diagnostic changes so a stale deploy is immediately obvious.
+    build_marker: String,
     snaptrade_accounts: Vec<DiagnosticAccountInfo>,
     raw_activities_count: usize,
     activity_account_ids_seen: Vec<String>,
@@ -356,6 +359,22 @@ struct AccountDiagnostic {
     /// display time because their asset does not exist.
     latest_snapshot_position_assets_resolved: usize,
     latest_snapshot_cash_currencies: Vec<String>,
+    /// Ground-truth inventory of ALL snapshots stored for this account (any source).
+    /// If snapshot_total_count has no "Calculated" entry in snapshot_source_counts,
+    /// the recalc engine is producing/persisting nothing at all for this account.
+    snapshot_total_count: usize,
+    /// Count of stored snapshots grouped by source (e.g. {"BrokerImported":1,"Calculated":420}).
+    snapshot_source_counts: HashMap<String, usize>,
+    /// Earliest / latest snapshot dates across ALL sources.
+    snapshot_date_min: Option<String>,
+    snapshot_date_max: Option<String>,
+    /// The latest CALCULATED frame specifically (independent of any broker anchor).
+    /// If this is present with a recent date and non-zero positions but the holdings
+    /// view is still empty, the problem is downstream (query/display), not recalc.
+    latest_calculated_snapshot_date: Option<String>,
+    latest_calculated_raw_positions_count: usize,
+    latest_calculated_nonzero_positions_count: usize,
+    latest_calculated_quantities_sample: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1123,6 +1142,57 @@ async fn sync_diagnostic(
             None => (None, None, 0, 0, Vec::new(), Vec::new(), 0, Vec::new()),
         };
 
+        // Full snapshot inventory (ground truth): does the recalc engine persist ANY
+        // calculated frame for this account, or only the broker anchor?
+        let all_snaps = state
+            .snapshot_repository
+            .get_snapshots_by_account(wf_account_id, None, None)
+            .unwrap_or_default();
+        let snapshot_total_count = all_snaps.len();
+        let mut snapshot_source_counts: HashMap<String, usize> = HashMap::new();
+        for s in &all_snaps {
+            *snapshot_source_counts
+                .entry(format!("{:?}", s.source))
+                .or_insert(0) += 1;
+        }
+        let snapshot_date_min = all_snaps
+            .iter()
+            .map(|s| s.snapshot_date)
+            .min()
+            .map(|d| d.to_string());
+        let snapshot_date_max = all_snaps
+            .iter()
+            .map(|s| s.snapshot_date)
+            .max()
+            .map(|d| d.to_string());
+        let latest_calculated = all_snaps
+            .iter()
+            .filter(|s| format!("{:?}", s.source) == "Calculated")
+            .max_by_key(|s| s.snapshot_date);
+        let (
+            latest_calculated_snapshot_date,
+            latest_calculated_raw_positions_count,
+            latest_calculated_nonzero_positions_count,
+            latest_calculated_quantities_sample,
+        ) = match latest_calculated {
+            Some(s) => {
+                let raw = s.positions.len();
+                let nonzero = s
+                    .positions
+                    .values()
+                    .filter(|p| p.quantity != Decimal::ZERO)
+                    .count();
+                let sample: Vec<String> = s
+                    .positions
+                    .values()
+                    .take(8)
+                    .map(|p| format!("{}={}@{}", p.asset_id, p.quantity, p.currency))
+                    .collect();
+                (Some(s.snapshot_date.to_string()), raw, nonzero, sample)
+            }
+            None => (None, 0, 0, Vec::new()),
+        };
+
         account_diagnostics.push(AccountDiagnostic {
             wf_account_id: wf_account_id.clone(),
             activity_count: activities.len(),
@@ -1138,10 +1208,19 @@ async fn sync_diagnostic(
             latest_snapshot_position_asset_ids_sample,
             latest_snapshot_position_assets_resolved,
             latest_snapshot_cash_currencies,
+            snapshot_total_count,
+            snapshot_source_counts,
+            snapshot_date_min,
+            snapshot_date_max,
+            latest_calculated_snapshot_date,
+            latest_calculated_raw_positions_count,
+            latest_calculated_nonzero_positions_count,
+            latest_calculated_quantities_sample,
         });
     }
 
     Ok(Json(SyncDiagnosticResponse {
+        build_marker: "e8e02ed0+diag2 (bg-job + snapshot-inventory)".to_string(),
         snaptrade_accounts,
         raw_activities_count: st_activities.len(),
         activity_account_ids_seen,
