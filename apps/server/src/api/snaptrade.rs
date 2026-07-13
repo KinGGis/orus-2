@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use reqwest;
 
-use crate::{error::{ApiError, ApiResult}, main_lib::AppState};
+use crate::{
+    api::shared::{enqueue_portfolio_job, PortfolioJobConfig},
+    error::{ApiError, ApiResult},
+    main_lib::AppState,
+};
 use axum::{
     extract::{Path, State},
     routing::{delete, get, post},
@@ -23,7 +27,7 @@ use wealthfolio_core::portfolio::snapshot::{
     AccountStateSnapshot, Position, SnapshotRecalcMode, SnapshotSource,
 };
 use wealthfolio_core::portfolio::valuation::ValuationRecalcMode;
-use wealthfolio_core::quotes::SyncMode;
+use wealthfolio_core::quotes::MarketSyncMode;
 use wealthfolio_core::snaptrade::{self, SnapTradeAccount};
 use std::collections::HashSet;
 
@@ -885,30 +889,8 @@ async fn sync_snaptrade(
             }
         }
 
-        if let Err(e) = state
-            .snapshot_service
-            .recalculate_holdings_snapshots(
-                Some(&recalc_account_ids),
-                SnapshotRecalcMode::Full,
-            )
-            .await
-        {
-            tracing::warn!(
-                "Failed to recalculate per-account holdings from activities after SnapTrade sync: {}",
-                e
-            );
-        }
-
-        // Recalculate TOTAL portfolio snapshots to include new holdings
-        if let Err(e) = state
-            .snapshot_service
-            .recalculate_total_portfolio_snapshots(SnapshotRecalcMode::Full)
-            .await
-        {
-            tracing::warn!("Failed to recalculate TOTAL snapshots after SnapTrade sync: {}", e);
-        }
-
-        // Register FX pairs for currency conversion
+        // Register FX pairs for currency conversion (quick, in-request so the
+        // background recalc can resolve conversions).
         if !fx_pairs.is_empty() {
             let pairs_vec: Vec<(String, String)> = fx_pairs.into_iter().collect();
             tracing::info!("Registering {} FX pairs for currency conversion...", pairs_vec.len());
@@ -917,53 +899,37 @@ async fn sync_snaptrade(
             }
         }
 
-        // Sync market data (quotes) for all assets
-        if !all_asset_ids.is_empty() {
+        // Delegate the heavy work (market sync + per-account & TOTAL holdings
+        // recalculation + valuations) to the shared background portfolio job.
+        // Running it synchronously inside this HTTP request made the sync exceed
+        // the hosting gateway timeout (Render free tier) and return 502 BEFORE the
+        // calculated frame was ever saved — leaving the stale positions-less broker
+        // anchor as the latest snapshot, so holdings/insights stayed empty. The job
+        // runs off-request (tokio::spawn), rebuilds holdings from the freshly
+        // imported activities, and emits SSE progress events the frontend already
+        // listens to. The activities and the anchor wipe above are already
+        // committed, so the job operates on a clean, complete dataset.
+        let market_sync_mode = if all_asset_ids.is_empty() {
+            MarketSyncMode::None
+        } else {
             let asset_ids_vec: Vec<String> = all_asset_ids.into_iter().collect();
-            tracing::info!("Syncing quotes for {} assets...", asset_ids_vec.len());
-            match state
-                .quote_service
-                .sync(SyncMode::RefetchRecent { days: 30 }, Some(asset_ids_vec))
-                .await
-            {
-                Ok(result) => {
-                    tracing::info!(
-                        "Quote sync completed: {} assets synced, {} quotes fetched",
-                        result.synced,
-                        result.quotes_synced
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to sync quotes after SnapTrade import: {}", e);
-                }
+            MarketSyncMode::Incremental {
+                asset_ids: Some(asset_ids_vec),
             }
-        }
-
-        // Calculate valuations for each mapped account
-        for account_id in &recalc_account_ids {
-            if let Err(e) = state
-                .valuation_service
-                .calculate_valuation_history(account_id, ValuationRecalcMode::Full)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to calculate valuations for account {} after SnapTrade sync: {}",
-                    account_id,
-                    e
-                );
-            }
-        }
-
-        // Calculate TOTAL portfolio valuations
-        if let Err(e) = state
-            .valuation_service
-            .calculate_valuation_history("TOTAL", ValuationRecalcMode::Full)
-            .await
-        {
-            tracing::warn!("Failed to calculate TOTAL valuations after SnapTrade sync: {}", e);
-        }
-
-        tracing::info!("Valuation calculations completed for {} accounts", recalc_account_ids.len());
+        };
+        enqueue_portfolio_job(
+            state.clone(),
+            PortfolioJobConfig {
+                account_ids: Some(recalc_account_ids.clone()),
+                market_sync_mode,
+                snapshot_mode: SnapshotRecalcMode::Full,
+                valuation_mode: ValuationRecalcMode::Full,
+            },
+        );
+        tracing::info!(
+            "Enqueued background portfolio recalc for {} account(s) after SnapTrade sync",
+            recalc_account_ids.len()
+        );
     }
 
     Ok(Json(SnapTradeSyncResponse {
