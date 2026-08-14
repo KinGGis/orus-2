@@ -426,7 +426,6 @@ impl FxRepositoryTrait for FxRepository {
                 .map(|value| value.as_db_str().to_string()),
             instrument_symbol: domain_asset.instrument_symbol,
             instrument_exchange_mic: domain_asset.instrument_exchange_mic,
-            instrument_key: Some(expected_key),
             provider_config: domain_asset.provider_config,
             created_at: now,
             updated_at: now,

@@ -5,7 +5,11 @@ use uuid::Uuid;
 
 use wealthfolio_core::assets::{Asset, AssetKind, InstrumentType, NewAsset, QuoteMode};
 
-#[derive(Queryable, Identifiable, Selectable, Insertable, AsChangeset, Debug, Clone)]
+// `instrument_key` is a generated column in Postgres, so this struct must stay
+// read-only: `Insertable`/`AsChangeset` would let a caller emit a write against
+// it, which the database rejects at runtime. Writes go through
+// `InsertableAssetDB` (which omits the column) or explicit `.set((...))` tuples.
+#[derive(Queryable, Identifiable, Selectable, Debug, Clone)]
 #[diesel(table_name = crate::schema::wf_assets)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct AssetDB {
