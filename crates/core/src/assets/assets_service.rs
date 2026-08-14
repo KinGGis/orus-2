@@ -1273,6 +1273,7 @@ mod tests {
                 _ => Some(serde_json::json!({ "preferred_provider": "YAHOO" })),
             },
             QuoteMode::Manual => None,
+            QuoteMode::InternalYtm => None,
         };
 
         assert!(
@@ -1294,6 +1295,7 @@ mod tests {
                 _ => Some(serde_json::json!({ "preferred_provider": "YAHOO" })),
             },
             QuoteMode::Manual => None,
+            QuoteMode::InternalYtm => None,
         };
 
         assert_eq!(
