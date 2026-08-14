@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::assets::{
-        canonicalize_market_identity, resolve_quote_ccy_precedence, Asset, AssetKind,
+        canonicalize_market_identity, resolve_quote_ccy_precedence, Asset, AssetKind, AssetSpec,
         InstrumentType, OptionSpec, QuoteCcyResolutionSource, QuoteMode,
     };
     use chrono::NaiveDateTime;
@@ -365,6 +365,112 @@ mod tests {
             resolved,
             Some(("GBP".to_string(), QuoteCcyResolutionSource::ProviderQuote))
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // AssetSpec::instrument_key
+    //
+    // This key is the sole deduplication key for assets, and it must stay in
+    // lockstep with the GENERATED ALWAYS column defined by both backends
+    // (storage-sqlite migration 2026-01-01-000000, storage-postgres migration
+    // 00000000000004). A divergence here silently re-creates assets on every
+    // broker sync.
+    // ---------------------------------------------------------------------
+
+    fn spec_for(
+        instrument_type: Option<InstrumentType>,
+        symbol: Option<&str>,
+        mic: Option<&str>,
+        quote_ccy: &str,
+    ) -> AssetSpec {
+        AssetSpec {
+            id: None,
+            display_code: symbol.map(|s| s.to_string()),
+            instrument_symbol: symbol.map(|s| s.to_string()),
+            instrument_exchange_mic: mic.map(|s| s.to_string()),
+            instrument_type,
+            quote_ccy: quote_ccy.to_string(),
+            requested_quote_ccy: None,
+            kind: AssetKind::Investment,
+            quote_mode: None,
+            name: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_instrument_key_equity_without_mic() {
+        let spec = spec_for(Some(InstrumentType::Equity), Some("INTC"), None, "USD");
+        assert_eq!(spec.instrument_key(), Some("EQUITY:INTC".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_equity_with_mic() {
+        let spec = spec_for(Some(InstrumentType::Equity), Some("DSY"), Some("XPAR"), "EUR");
+        assert_eq!(spec.instrument_key(), Some("EQUITY:DSY@XPAR".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_fx_and_crypto_use_quote_ccy() {
+        let fx = spec_for(Some(InstrumentType::Fx), Some("EUR"), None, "USD");
+        assert_eq!(fx.instrument_key(), Some("FX:EUR/USD".to_string()));
+
+        let crypto = spec_for(Some(InstrumentType::Crypto), Some("BTC"), None, "USD");
+        assert_eq!(crypto.instrument_key(), Some("CRYPTO:BTC/USD".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_fx_ignores_mic() {
+        // FX pairs are not exchange-listed; a stray MIC must not change the key.
+        let spec = spec_for(Some(InstrumentType::Fx), Some("EUR"), Some("XPAR"), "USD");
+        assert_eq!(spec.instrument_key(), Some("FX:EUR/USD".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_none_without_type_or_symbol() {
+        assert_eq!(spec_for(None, Some("INTC"), None, "USD").instrument_key(), None);
+        assert_eq!(
+            spec_for(Some(InstrumentType::Equity), None, None, "USD").instrument_key(),
+            None
+        );
+        assert_eq!(
+            spec_for(Some(InstrumentType::Equity), Some(""), None, "USD").instrument_key(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_instrument_key_empty_mic_falls_back_to_bare_key() {
+        // Providers sometimes return "" rather than omitting the MIC. An empty
+        // string must not produce "EQUITY:INTC@".
+        let spec = spec_for(Some(InstrumentType::Equity), Some("INTC"), Some(""), "USD");
+        assert_eq!(spec.instrument_key(), Some("EQUITY:INTC".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_keeps_dual_listings_distinct() {
+        // Stellantis is listed on both NYSE (USD) and Euronext Paris (EUR).
+        // These are separate instruments with separate prices: the key must
+        // keep them apart, and the dedup migration must never merge them.
+        let nyse = spec_for(Some(InstrumentType::Equity), Some("STLA"), None, "USD");
+        let paris = spec_for(Some(InstrumentType::Equity), Some("STLA"), Some("XPAR"), "EUR");
+        assert_ne!(nyse.instrument_key(), paris.instrument_key());
+        assert_eq!(nyse.instrument_key(), Some("EQUITY:STLA".to_string()));
+        assert_eq!(paris.instrument_key(), Some("EQUITY:STLA@XPAR".to_string()));
+    }
+
+    #[test]
+    fn test_instrument_key_uppercases_unlike_the_database() {
+        // KNOWN DIVERGENCE, asserted here so it is not mistaken for a bug and
+        // so a future fix has to update this test deliberately.
+        //
+        // The Rust helper uppercases the symbol and MIC; the generated database
+        // column concatenates them verbatim. For a lowercase symbol the two
+        // disagree ("EQUITY:INTC" here vs "EQUITY:intc" in the column), which
+        // would defeat deduplication. Harmless today because every symbol
+        // reaching the database is already uppercase.
+        let spec = spec_for(Some(InstrumentType::Equity), Some("intc"), Some("xpar"), "usd");
+        assert_eq!(spec.instrument_key(), Some("EQUITY:INTC@XPAR".to_string()));
     }
 
     // Helper function

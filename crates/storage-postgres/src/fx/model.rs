@@ -32,6 +32,10 @@ pub struct AssetDB {
     pub updated_at: DateTime<Utc>,
 }
 
+// `instrument_key` is intentionally absent: the column is GENERATED ALWAYS in
+// Postgres, so any explicit value makes the INSERT fail. The database derives
+// `FX:<instrument_symbol>/<quote_ccy>`, which matches
+// `ExchangeRate::make_instrument_key`.
 #[derive(Insertable, Debug, Clone)]
 #[diesel(table_name = crate::schema::wf_assets)]
 pub struct InsertableAssetDB {
@@ -47,7 +51,6 @@ pub struct InsertableAssetDB {
     pub instrument_type: Option<String>,
     pub instrument_symbol: Option<String>,
     pub instrument_exchange_mic: Option<String>,
-    pub instrument_key: Option<String>,
     pub provider_config: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
