@@ -61,8 +61,20 @@ impl TryFrom<&DailyAccountValuation> for DailyAccountValuationDB {
     type Error = Error;
 
     fn try_from(value: &DailyAccountValuation) -> Result<Self> {
+        // Postgres stores the valuation id as a UUID, but the domain id is the
+        // composite "{account_id}_{date}" built by the valuation calculator,
+        // which never parses as one. Fall back to the deterministic UUID
+        // derived from account_id + valuation_date so upserts still target a
+        // stable row. Same treatment as wf_holdings_snapshots.
+        let valuation_id = Uuid::parse_str(&value.id).or_else(|_| {
+            Uuid::parse_str(&DailyAccountValuation::stable_id(
+                &value.account_id,
+                value.valuation_date,
+            ))
+        });
+
         Ok(Self {
-            id: Uuid::parse_str(&value.id).map_err(|err| {
+            id: valuation_id.map_err(|err| {
                 Error::Validation(ValidationError::InvalidInput(format!(
                     "Invalid valuation id UUID: {err}"
                 )))
