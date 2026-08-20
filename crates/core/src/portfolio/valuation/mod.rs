@@ -5,6 +5,9 @@ mod valuation_model;
 pub mod valuation_service;
 mod valuation_traits;
 
+#[cfg(test)]
+mod valuation_model_tests;
+
 pub use valuation_calculator::*;
 pub use valuation_model::*;
 pub use valuation_service::ValuationRecalcMode;
