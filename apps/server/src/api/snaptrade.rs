@@ -35,6 +35,16 @@ use std::collections::HashSet;
 const SNAPTRADE_USER_ID_KEY: &str = "snaptrade_user_id";
 const SNAPTRADE_USER_SECRET_KEY: &str = "snaptrade_user_secret";
 
+/// Identifies the running build so a diagnostic response can prove which commit
+/// is actually deployed. Render injects `RENDER_GIT_COMMIT`; fall back to the
+/// commit baked in at compile time, then to a placeholder.
+fn build_marker() -> String {
+    std::env::var("RENDER_GIT_COMMIT")
+        .ok()
+        .or_else(|| option_env!("GIT_COMMIT_SHA").map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 // ============================================================================
 // Response DTOs (transformed for frontend)
 // ============================================================================
@@ -1220,7 +1230,7 @@ async fn sync_diagnostic(
     }
 
     Ok(Json(SyncDiagnosticResponse {
-        build_marker: "e8e02ed0+diag2 (bg-job + snapshot-inventory)".to_string(),
+        build_marker: build_marker(),
         snaptrade_accounts,
         raw_activities_count: st_activities.len(),
         activity_account_ids_seen,
@@ -1306,6 +1316,111 @@ async fn debug_sig(
 }
 
 /// GET /dfc/snaptrade/valuation-diagnostic - Diagnostic endpoint for valuation issues
+/// Replays the exact day-skip conditions of
+/// `ValuationService::calculate_valuation_history` so a diagnostic can show why
+/// no valuation row is produced for a date. The calculator only logs these at
+/// `debug!` level, which is invisible in production.
+fn analyze_valuation_skips(
+    state: &Arc<AppState>,
+    snapshots: &[AccountStateSnapshot],
+) -> serde_json::Value {
+    const DAYS_ANALYZED: usize = 15;
+
+    let (Some(first), Some(last)) = (snapshots.first(), snapshots.last()) else {
+        return serde_json::json!({ "analyzed": 0, "days": [] });
+    };
+
+    let required_asset_ids: HashSet<String> = snapshots
+        .iter()
+        .flat_map(|snapshot| snapshot.positions.keys().cloned())
+        .collect();
+
+    let filled_quotes = state
+        .quote_service
+        .get_quotes_in_range_filled(&required_asset_ids, first.snapshot_date, last.snapshot_date)
+        .unwrap_or_default();
+
+    // An asset absent from this set has no quote anywhere and is valued at zero
+    // instead of skipping the day, so it must not count as a gap.
+    let mut assets_with_quotes: HashSet<String> = HashSet::new();
+    let mut quoted_by_date: HashMap<chrono::NaiveDate, HashSet<String>> = HashMap::new();
+    for quote in &filled_quotes {
+        assets_with_quotes.insert(quote.asset_id.clone());
+        quoted_by_date
+            .entry(quote.timestamp.date_naive())
+            .or_default()
+            .insert(quote.asset_id.clone());
+    }
+
+    let base_currency = state.base_currency.read().unwrap().clone();
+
+    let start = snapshots.len().saturating_sub(DAYS_ANALYZED);
+    let days: Vec<serde_json::Value> = snapshots[start..]
+        .iter()
+        .map(|snapshot| {
+            let quoted_today = quoted_by_date.get(&snapshot.snapshot_date);
+
+            let held: Vec<&String> = snapshot
+                .positions
+                .iter()
+                .filter(|(_, position)| position.quantity != Decimal::ZERO)
+                .map(|(asset_id, _)| asset_id)
+                .collect();
+
+            let missing: Vec<String> = held
+                .iter()
+                .filter(|asset_id| assets_with_quotes.contains(**asset_id))
+                .filter(|asset_id| {
+                    !quoted_today.is_some_and(|quoted| quoted.contains(**asset_id))
+                })
+                .map(|asset_id| (*asset_id).clone())
+                .collect();
+
+            let unquotable = held
+                .iter()
+                .filter(|asset_id| !assets_with_quotes.contains(**asset_id))
+                .count();
+
+            let fx_missing = snapshot.currency != base_currency
+                && state
+                    .fx_service
+                    .get_exchange_rate_for_date(
+                        &snapshot.currency,
+                        &base_currency,
+                        snapshot.snapshot_date,
+                    )
+                    .is_err();
+
+            let reason = if !missing.is_empty() {
+                "quote_gap"
+            } else if fx_missing {
+                "missing_fx_rate"
+            } else {
+                "ok"
+            };
+
+            serde_json::json!({
+                "date": snapshot.snapshot_date.to_string(),
+                "accountCurrency": snapshot.currency,
+                "heldPositions": held.len(),
+                "assetsMissingQuoteForDate": missing.len(),
+                "assetsWithNoQuoteAtAll": unquotable,
+                "sampleMissingAssetIds": missing.iter().take(5).collect::<Vec<_>>(),
+                "fxRateMissing": fx_missing,
+                "wouldSkip": reason != "ok",
+                "reason": reason,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "analyzed": days.len(),
+        "assetsWithAnyQuote": assets_with_quotes.len(),
+        "assetsRequired": required_asset_ids.len(),
+        "days": days,
+    })
+}
+
 async fn valuation_diagnostic(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1379,6 +1494,7 @@ async fn valuation_diagnostic(
             "valuationsCount": valuations.len(),
             "assetsCount": asset_ids.len(),
             "assetQuoteStatus": asset_quote_status,
+            "valuationSkipAnalysis": analyze_valuation_skips(&state, &snapshots),
             "latestSnapshotDate": snapshots.last().map(|s| s.snapshot_date.to_string()),
             "latestValuationDate": valuations.last().map(|v| v.valuation_date.to_string()),
             "latestValuationValue": valuations.last().map(|v| v.total_value.to_string()),
@@ -1406,6 +1522,7 @@ async fn valuation_diagnostic(
     }
     
     Ok(Json(serde_json::json!({
+        "buildMarker": build_marker(),
         "baseCurrency": base_currency,
         "today": today.to_string(),
         "accounts": account_diagnostics,
