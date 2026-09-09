@@ -1343,22 +1343,32 @@ fn analyze_valuation_skips(
     // An asset absent from this set has no quote anywhere and is valued at zero
     // instead of skipping the day, so it must not count as a gap.
     let mut assets_with_quotes: HashSet<String> = HashSet::new();
-    let mut quoted_by_date: HashMap<chrono::NaiveDate, HashSet<String>> = HashMap::new();
+    let mut quotes_by_date: HashMap<chrono::NaiveDate, HashMap<String, wealthfolio_core::quotes::Quote>> =
+        HashMap::new();
     for quote in &filled_quotes {
         assets_with_quotes.insert(quote.asset_id.clone());
-        quoted_by_date
+        quotes_by_date
             .entry(quote.timestamp.date_naive())
             .or_default()
-            .insert(quote.asset_id.clone());
+            .insert(quote.asset_id.clone(), quote.clone());
     }
 
-    let base_currency = state.base_currency.read().unwrap().clone();
+    let base_currency = wealthfolio_core::fx::currency::normalize_currency_code(
+        &state.base_currency.read().unwrap(),
+    )
+    .to_string();
 
     let start = snapshots.len().saturating_sub(DAYS_ANALYZED);
     let days: Vec<serde_json::Value> = snapshots[start..]
         .iter()
         .map(|snapshot| {
-            let quoted_today = quoted_by_date.get(&snapshot.snapshot_date);
+            let account_curr =
+                wealthfolio_core::fx::currency::normalize_currency_code(&snapshot.currency)
+                    .to_string();
+            let quotes_for_current_date = quotes_by_date
+                .get(&snapshot.snapshot_date)
+                .cloned()
+                .unwrap_or_default();
 
             let held: Vec<&String> = snapshot
                 .positions
@@ -1371,7 +1381,7 @@ fn analyze_valuation_skips(
                 .iter()
                 .filter(|asset_id| assets_with_quotes.contains(**asset_id))
                 .filter(|asset_id| {
-                    !quoted_today.is_some_and(|quoted| quoted.contains(**asset_id))
+                    !quotes_for_current_date.contains_key(**asset_id)
                 })
                 .map(|asset_id| (*asset_id).clone())
                 .collect();
@@ -1381,20 +1391,73 @@ fn analyze_valuation_skips(
                 .filter(|asset_id| !assets_with_quotes.contains(**asset_id))
                 .count();
 
-            let fx_missing = snapshot.currency != base_currency
-                && state
+            let mut required_fx_pairs: HashSet<(String, String)> = HashSet::new();
+            if account_curr != base_currency {
+                required_fx_pairs.insert((account_curr.clone(), base_currency.clone()));
+            }
+
+            for position in snapshot.positions.values() {
+                if position.quantity == Decimal::ZERO {
+                    continue;
+                }
+                let position_currency =
+                    wealthfolio_core::fx::currency::normalize_currency_code(&position.currency)
+                        .to_string();
+                if position_currency != account_curr {
+                    required_fx_pairs.insert((position_currency, account_curr.clone()));
+                }
+            }
+
+            for cash_currency in snapshot.cash_balances.keys() {
+                let normalized_cash_currency =
+                    wealthfolio_core::fx::currency::normalize_currency_code(cash_currency)
+                        .to_string();
+                if normalized_cash_currency != account_curr {
+                    required_fx_pairs.insert((normalized_cash_currency, account_curr.clone()));
+                }
+            }
+
+            for quote in quotes_for_current_date.values() {
+                let quote_currency =
+                    wealthfolio_core::fx::currency::normalize_currency_code(&quote.currency)
+                        .to_string();
+                if quote_currency != account_curr {
+                    required_fx_pairs.insert((quote_currency, account_curr.clone()));
+                }
+            }
+
+            let mut fx_for_current_date: HashMap<(String, String), Decimal> = HashMap::new();
+            let mut missing_fx_pairs: Vec<String> = Vec::new();
+            for (from, to) in required_fx_pairs {
+                match state
                     .fx_service
-                    .get_exchange_rate_for_date(
-                        &snapshot.currency,
-                        &base_currency,
-                        snapshot.snapshot_date,
-                    )
-                    .is_err();
+                    .get_exchange_rate_for_date(&from, &to, snapshot.snapshot_date)
+                {
+                    Ok(rate) => {
+                        fx_for_current_date.insert((from.clone(), to.clone()), rate);
+                    }
+                    Err(_) => {
+                        missing_fx_pairs.push(format!("{from}->{to}"));
+                    }
+                }
+            }
+
+            let calculation_error = wealthfolio_core::portfolio::valuation::calculate_valuation(
+                snapshot,
+                &quotes_for_current_date,
+                &fx_for_current_date,
+                snapshot.snapshot_date,
+                &base_currency,
+            )
+            .err()
+            .map(|error| error.to_string());
 
             let reason = if !missing.is_empty() {
                 "quote_gap"
-            } else if fx_missing {
+            } else if !missing_fx_pairs.is_empty() {
                 "missing_fx_rate"
+            } else if calculation_error.is_some() {
+                "calculation_error"
             } else {
                 "ok"
             };
@@ -1406,7 +1469,10 @@ fn analyze_valuation_skips(
                 "assetsMissingQuoteForDate": missing.len(),
                 "assetsWithNoQuoteAtAll": unquotable,
                 "sampleMissingAssetIds": missing.iter().take(5).collect::<Vec<_>>(),
-                "fxRateMissing": fx_missing,
+                "fxRateMissing": !missing_fx_pairs.is_empty(),
+                "missingFxPairsCount": missing_fx_pairs.len(),
+                "sampleMissingFxPairs": missing_fx_pairs.iter().take(5).collect::<Vec<_>>(),
+                "calculationError": calculation_error,
                 "wouldSkip": reason != "ok",
                 "reason": reason,
             })
