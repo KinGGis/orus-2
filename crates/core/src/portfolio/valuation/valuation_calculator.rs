@@ -128,12 +128,21 @@ fn calculate_investment_market_value_acct(
             let quote_fx_rate = if normalized_quote_currency == account_currency {
                 Decimal::ONE
             } else {
-                get_rate_from_map(
+                match get_rate_from_map(
                     fx_rates_today,
                     normalized_quote_currency,
                     account_currency,
                     target_date,
-                )? // Propagate error if FX rate is missing
+                ) {
+                    Ok(rate) => rate,
+                    Err(_) => {
+                        warn!(
+                            "Missing FX rate for asset {} ({}->{}) on {}. Position market value treated as ZERO.",
+                            asset_id, normalized_quote_currency, account_currency, target_date
+                        );
+                        continue;
+                    }
+                }
             };
 
             let market_value =
@@ -172,13 +181,21 @@ fn calculate_cash_value_acct(
         let cash_fx_rate = if normalized_cash_currency == account_currency {
             Decimal::ONE
         } else {
-            get_rate_from_map(
+            match get_rate_from_map(
                 fx_rates_today,
                 normalized_cash_currency,
                 account_currency,
                 target_date,
-            )?
-            // Propagate error if FX rate is missing
+            ) {
+                Ok(rate) => rate,
+                Err(_) => {
+                    warn!(
+                        "Missing FX rate for cash balance ({}->{}) on {}. Cash component treated as ZERO.",
+                        normalized_cash_currency, account_currency, target_date
+                    );
+                    continue;
+                }
+            }
         };
         total_cash_value += normalized_amount * cash_fx_rate;
     }
