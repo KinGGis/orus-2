@@ -113,6 +113,7 @@ impl ValuationService {
         pairs: &HashSet<(String, String)>,
         start_date: NaiveDate,
         end_date: NaiveDate,
+        base_currency: &str,
     ) -> CoreResult<HashMap<NaiveDate, DailyFxRateMap>> {
         if pairs.is_empty() {
             return Ok(HashMap::new());
@@ -132,10 +133,42 @@ impl ValuationService {
                         daily_map.insert((from_curr.clone(), to_curr.clone()), rate);
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to get FX rate {}->{} for date {}: {}. Valuation for this date might be affected.",
-                            from_curr, to_curr, current_date, e
-                        );
+                        let via_base = if from_curr != base_currency && to_curr != base_currency {
+                            let from_to_base = self.fx_service.get_exchange_rate_for_date(
+                                from_curr,
+                                base_currency,
+                                current_date,
+                            );
+                            let to_to_base = self.fx_service.get_exchange_rate_for_date(
+                                to_curr,
+                                base_currency,
+                                current_date,
+                            );
+
+                            match (from_to_base, to_to_base) {
+                                (Ok(from_base_rate), Ok(to_base_rate))
+                                    if !to_base_rate.is_zero() =>
+                                {
+                                    Some(from_base_rate / to_base_rate)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(rate) = via_base {
+                            debug!(
+                                "Resolved FX rate {}->{} for {} via base currency {}.",
+                                from_curr, to_curr, current_date, base_currency
+                            );
+                            daily_map.insert((from_curr.clone(), to_curr.clone()), rate);
+                        } else {
+                            warn!(
+                                "Failed to get FX rate {}->{} for date {}: {}. Valuation for this date might be affected.",
+                                from_curr, to_curr, current_date, e
+                            );
+                        }
                     }
                 }
             }
@@ -260,6 +293,7 @@ impl ValuationServiceTrait for ValuationService {
                 &required_fx_pairs,
                 actual_calculation_start_date,
                 calculation_end_date,
+                &base_curr,
             )
             .await?;
 
@@ -328,14 +362,15 @@ impl ValuationServiceTrait for ValuationService {
                     );
                     return None;
                 }
-                let account_curr = &holdings_snapshot.currency;
-                if account_curr != &base_curr_clone
+                let normalized_account_curr =
+                    normalize_currency_code(&holdings_snapshot.currency).to_string();
+                if normalized_account_curr != base_curr_clone
                     && !fx_for_current_date
-                        .contains_key(&(account_curr.clone(), base_curr_clone.clone()))
+                        .contains_key(&(normalized_account_curr.clone(), base_curr_clone.clone()))
                 {
                     warn!(
                         "Base currency FX rate ({}->{}) missing for {} (account '{}'). Skipping day.",
-                        account_curr, base_curr_clone, current_date, account_id_clone
+                        normalized_account_curr, base_curr_clone, current_date, account_id_clone
                     );
                     return None;
                 }
