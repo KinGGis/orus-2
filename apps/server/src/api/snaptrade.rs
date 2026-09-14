@@ -1666,6 +1666,180 @@ async fn enrich_unenriched_assets(
     })))
 }
 
+/// GET /dfc/snaptrade/holdings-diagnostic - Explain phantom positions
+///
+/// Holdings for Transactions-mode accounts are rebuilt by replaying activities,
+/// so a position can survive a full sell if its BUY and SELL rows resolved to
+/// different asset ids for the same ticker. This endpoint reconciles the latest
+/// snapshot against the activity ledger and reports the mismatch per symbol.
+async fn holdings_diagnostic(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+
+    let accounts = state
+        .account_service
+        .get_active_accounts()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let mut out = Vec::new();
+
+    for account in accounts
+        .iter()
+        .filter(|a| a.provider.as_deref() == Some("SNAPTRADE"))
+    {
+        let snapshot = state
+            .snapshot_service
+            .get_latest_holdings_snapshot(&account.id)
+            .ok()
+            .flatten();
+
+        let activities = state
+            .activity_service
+            .get_activities_by_account_id(&account.id)
+            .unwrap_or_default();
+
+        // Net quantity implied by the ledger, per asset id.
+        let mut net_by_asset: HashMap<String, Decimal> = HashMap::new();
+        let mut buys_by_asset: HashMap<String, usize> = HashMap::new();
+        let mut sells_by_asset: HashMap<String, usize> = HashMap::new();
+        let mut orphan_sells = 0usize;
+
+        for activity in &activities {
+            let Some(asset_id) = activity.asset_id.as_deref() else {
+                continue;
+            };
+            let kind = activity.activity_type.to_uppercase();
+            let qty = activity.quantity.unwrap_or(Decimal::ZERO);
+
+            match kind.as_str() {
+                "BUY" | "TRANSFER_IN" => {
+                    *net_by_asset.entry(asset_id.to_string()).or_default() += qty;
+                    *buys_by_asset.entry(asset_id.to_string()).or_default() += 1;
+                }
+                "SELL" | "TRANSFER_OUT" => {
+                    *net_by_asset.entry(asset_id.to_string()).or_default() -= qty;
+                    *sells_by_asset.entry(asset_id.to_string()).or_default() += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Resolve every asset id we touched so we can group by ticker.
+        let mut symbol_of: HashMap<String, String> = HashMap::new();
+        let mut asset_ids: HashSet<String> = net_by_asset.keys().cloned().collect();
+        if let Some(snap) = snapshot.as_ref() {
+            asset_ids.extend(snap.positions.keys().cloned());
+        }
+        for asset_id in &asset_ids {
+            let symbol = state
+                .asset_service
+                .get_asset_by_id(asset_id)
+                .ok()
+                .and_then(|a| a.instrument_symbol.or(a.display_code))
+                .unwrap_or_else(|| "?".to_string())
+                .to_uppercase();
+            symbol_of.insert(asset_id.clone(), symbol);
+        }
+
+        // A ticker mapped to several asset ids is the duplicate-asset signature.
+        let mut ids_per_symbol: HashMap<String, HashSet<String>> = HashMap::new();
+        for (asset_id, symbol) in &symbol_of {
+            ids_per_symbol
+                .entry(symbol.clone())
+                .or_default()
+                .insert(asset_id.clone());
+        }
+        let duplicated_symbols: Vec<serde_json::Value> = ids_per_symbol
+            .iter()
+            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(symbol, ids)| {
+                serde_json::json!({
+                    "symbol": symbol,
+                    "assetIdCount": ids.len(),
+                    "assetIds": ids.iter().cloned().collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        // Positions that are held but that the ledger says should be flat.
+        let mut phantom_positions = Vec::new();
+        let mut held_count = 0usize;
+        if let Some(snap) = snapshot.as_ref() {
+            for (asset_id, position) in &snap.positions {
+                if position.quantity == Decimal::ZERO {
+                    continue;
+                }
+                held_count += 1;
+
+                let ledger_net = net_by_asset
+                    .get(asset_id)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+
+                let symbol = symbol_of
+                    .get(asset_id)
+                    .cloned()
+                    .unwrap_or_else(|| "?".to_string());
+
+                // Same ticker seen under another asset id that carries sells.
+                let sibling_sells: usize = ids_per_symbol
+                    .get(&symbol)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter(|id| *id != asset_id)
+                            .map(|id| sells_by_asset.get(id).copied().unwrap_or(0))
+                            .sum()
+                    })
+                    .unwrap_or(0);
+
+                let own_sells = sells_by_asset.get(asset_id).copied().unwrap_or(0);
+
+                if ledger_net <= Decimal::ZERO || sibling_sells > 0 {
+                    phantom_positions.push(serde_json::json!({
+                        "symbol": symbol,
+                        "assetId": asset_id,
+                        "snapshotQuantity": position.quantity.to_string(),
+                        "ledgerNetQuantity": ledger_net.to_string(),
+                        "buysOnThisAssetId": buys_by_asset.get(asset_id).copied().unwrap_or(0),
+                        "sellsOnThisAssetId": own_sells,
+                        "sellsOnOtherAssetIdsSameSymbol": sibling_sells,
+                        "likelyCause": if sibling_sells > 0 {
+                            "sell_recorded_under_different_asset_id"
+                        } else {
+                            "ledger_net_not_positive"
+                        },
+                    }));
+                }
+            }
+        }
+
+        for activity in &activities {
+            if activity.asset_id.is_none()
+                && activity.activity_type.eq_ignore_ascii_case("SELL")
+            {
+                orphan_sells += 1;
+            }
+        }
+
+        out.push(serde_json::json!({
+            "accountId": account.id,
+            "accountName": account.name,
+            "trackingMode": format!("{:?}", account.tracking_mode),
+            "latestSnapshotDate": snapshot.as_ref().map(|s| s.snapshot_date.to_string()),
+            "latestSnapshotSource": snapshot.as_ref().map(|s| format!("{:?}", s.source)),
+            "heldPositions": held_count,
+            "activitiesTotal": activities.len(),
+            "sellsWithoutAssetId": orphan_sells,
+            "duplicatedSymbolsCount": duplicated_symbols.len(),
+            "duplicatedSymbols": duplicated_symbols,
+            "phantomPositionsCount": phantom_positions.len(),
+            "phantomPositions": phantom_positions,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "accounts": out })))
+}
 /// Purge all SnapTrade snapshots and valuations (to allow clean re-sync)
 async fn purge_snaptrade_data(
     State(state): State<Arc<AppState>>,
@@ -1728,6 +1902,7 @@ pub fn router() -> Router<Arc<AppState>> {
         // Diagnostic (remove after signature debugging)
         .route("/dfc/snaptrade/debug-sig", get(debug_sig))
         .route("/dfc/snaptrade/valuation-diagnostic", get(valuation_diagnostic))
+        .route("/dfc/snaptrade/holdings-diagnostic", get(holdings_diagnostic))
         .route("/dfc/snaptrade/purge", post(purge_snaptrade_data))
         // Asset enrichment
         .route("/dfc/assets/enrich", post(enrich_unenriched_assets))
