@@ -576,6 +576,27 @@ pub async fn list_holdings(
     snaptrade_get(cfg, &path, Some(user_id), Some(user_secret)).await
 }
 
+/// List the current positions of a single account.
+///
+/// GET /accounts/{accountId}/positions
+///
+/// This is the supported replacement for the deprecated `/holdings` endpoints,
+/// which return HTTP 410 Gone for connections created after 2026-05-11 and, for
+/// some brokerages (notably Interactive Brokers), return only cash balances with
+/// an empty position list. SnapTrade documents positions as "the current
+/// holdings of the account excluding cash", so the response is authoritative for
+/// what is held *right now* and must be preferred over replaying an activity
+/// ledger that is truncated to a fixed lookback window.
+pub async fn list_account_positions(
+    cfg: &SnapTradeConfig,
+    user_id: &str,
+    user_secret: &str,
+    account_id: &str,
+) -> Result<Vec<SnapTradePosition>, Error> {
+    let path = format!("/accounts/{}/positions", account_id);
+    snaptrade_get(cfg, &path, Some(user_id), Some(user_secret)).await
+}
+
 /// List activities/transactions for a user.
 ///
 /// GET /activities
