@@ -621,12 +621,83 @@ async fn sync_snaptrade(
         bulk_result.upserted
     );
 
-    // 8. Fetch SnapTrade holdings and create snapshots
-    let st_holdings = snaptrade::list_holdings(config, &user_id, &user_secret, None)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to list holdings: {}", e)))?;
+    // 8. Fetch SnapTrade holdings and create snapshots.
+    //
+    // The aggregate `/holdings` endpoint is deprecated (HTTP 410 Gone for newer
+    // connections) and, for Interactive Brokers, returns only cash balances with
+    // an empty position list. It is therefore best-effort here: it remains the
+    // source for cash balances, but a failure must not abort the whole sync.
+    let st_holdings = match snaptrade::list_holdings(config, &user_id, &user_secret, None).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                "Deprecated /holdings endpoint failed ({}); continuing with per-account positions only",
+                e
+            );
+            Vec::new()
+        }
+    };
 
     tracing::info!("SnapTrade returned {} account holdings", st_holdings.len());
+
+    // 8b. Fetch the CURRENT positions of every mapped account from the supported
+    // `/accounts/{accountId}/positions` endpoint. SnapTrade defines positions as
+    // "the current holdings of the account excluding cash", so this is the
+    // authoritative answer to "what is held today". Without it, Transactions-mode
+    // accounts fall back to replaying a 730-day activity ledger, which resurrects
+    // every instrument ever bought inside that window as if it were still held.
+    let mut positions_by_account: HashMap<String, Vec<snaptrade::SnapTradePosition>> =
+        HashMap::new();
+    for st_account_id in account_map.keys() {
+        match snaptrade::list_account_positions(config, &user_id, &user_secret, st_account_id).await
+        {
+            Ok(positions) => {
+                tracing::info!(
+                    "SnapTrade /accounts/{}/positions returned {} positions",
+                    st_account_id,
+                    positions.len()
+                );
+                positions_by_account.insert(st_account_id.clone(), positions);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch positions for SnapTrade account {}: {}",
+                    st_account_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Accounts for which the positions endpoint answered successfully. For these
+    // the broker response is authoritative even when empty (an account that
+    // genuinely holds nothing), so activity replay must not resurrect old lines.
+    let accounts_with_authoritative_positions: HashSet<String> = positions_by_account
+        .keys()
+        .filter_map(|st_id| account_map.get(st_id).cloned())
+        .collect();
+
+    // Ensure every account with authoritative positions is processed below, even
+    // when the deprecated /holdings response omitted it entirely.
+    let mut st_holdings = st_holdings;
+    {
+        let covered: HashSet<String> = st_holdings
+            .iter()
+            .map(|h| h.account.as_ref().map(|a| a.id.clone()).unwrap_or_default())
+            .collect();
+        for st_account in &st_accounts {
+            if positions_by_account.contains_key(&st_account.id)
+                && !covered.contains(&st_account.id)
+            {
+                st_holdings.push(snaptrade::SnapTradeAccountHoldings {
+                    account: Some(st_account.clone()),
+                    positions: None,
+                    balances: None,
+                    total_value: None,
+                });
+            }
+        }
+    }
 
     let today_date = Utc::now().date_naive();
     let mut snapshots_to_save: Vec<AccountStateSnapshot> = Vec::new();
@@ -677,17 +748,34 @@ async fn sync_snaptrade(
             .and_then(|c| c.code.clone())
             .unwrap_or_else(|| "USD".to_string());
 
-        // Build positions HashMap
+        // Build positions HashMap. Prefer the authoritative per-account positions
+        // endpoint; fall back to the deprecated /holdings payload only when that
+        // call did not answer for this account.
         let mut positions: HashMap<String, Position> = HashMap::new();
-        if let Some(ref st_positions) = holding.positions {
+        let st_positions_source: Option<&Vec<snaptrade::SnapTradePosition>> = positions_by_account
+            .get(&st_account_id)
+            .or(holding.positions.as_ref());
+        if let Some(st_positions) = st_positions_source {
             for pos in st_positions {
                 // Navigate nested symbol structure: pos.symbol -> SnapTradePositionSymbol -> symbol -> SnapTradeSymbol -> symbol (String)
-                let symbol = pos
+                let symbol = match pos
                     .symbol
                     .as_ref()
                     .and_then(|wrapper| wrapper.symbol.as_ref())
                     .and_then(|inner| inner.symbol.clone())
-                    .unwrap_or_else(|| "UNKNOWN".to_string());
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    Some(s) => s,
+                    None => {
+                        // Creating a bogus "UNKNOWN" asset pollutes holdings and
+                        // valuation; skip the line instead.
+                        tracing::warn!(
+                            "Skipping SnapTrade position without a symbol for account {}",
+                            wf_account_id
+                        );
+                        continue;
+                    }
+                };
 
                 // Get asset description/name from SnapTrade
                 let asset_name = pos
@@ -703,6 +791,18 @@ async fn sync_snaptrade(
                     .units
                     .map(|u| Decimal::try_from(u).unwrap_or(Decimal::ZERO))
                     .unwrap_or(Decimal::ZERO);
+
+                // A zero-unit line is a closed position. Negative units are valid
+                // short positions and must be kept, so filter on non-zero rather
+                // than on positive quantity.
+                if quantity.is_zero() {
+                    tracing::debug!(
+                        "Skipping closed SnapTrade position {} (0 units) for account {}",
+                        symbol,
+                        wf_account_id
+                    );
+                    continue;
+                }
 
                 let avg_cost = pos
                     .average_purchase_price
@@ -842,7 +942,16 @@ async fn sync_snaptrade(
         // activity-derived holdings: overwrite_all_snapshots_for_account preserves
         // broker anchors on their date and drops any calculated frame sharing that
         // date, leaving the latest snapshot at 0 positions.
-        if snapshot.positions.is_empty() {
+        // An empty anchor is only meaningful when the authoritative positions
+        // endpoint actually answered for this account: SnapTrade then states the
+        // account holds nothing, and the anchor must be persisted so that activity
+        // replay cannot resurrect instruments that were bought and later sold.
+        // When the position list merely came from the deprecated /holdings payload
+        // (which returns cash-only for IBKR), an empty anchor would wrongly shadow
+        // the activity-derived holdings, so it is skipped as before.
+        if snapshot.positions.is_empty()
+            && !accounts_with_authoritative_positions.contains(&wf_account_id)
+        {
             accounts_without_broker_positions.insert(wf_account_id.clone());
             tracing::info!(
                 "Skipping positions-less broker anchor for account {} (holdings derived from activities)",
