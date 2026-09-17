@@ -301,7 +301,7 @@ async fn list_accounts(
 // ============================================================================
 
 /// Response for POST /dfc/snaptrade/sync
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapTradeSyncResponse {
     accounts_synced: usize,
@@ -393,10 +393,99 @@ struct DateRange {
     end: String,
 }
 
-/// POST /api/dfc/snaptrade/sync - Sync accounts and activities from SnapTrade to WF database
+/// Progress of the most recent background SnapTrade sync.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SnapTradeSyncStatus {
+    /// "idle" | "running" | "succeeded" | "failed"
+    state: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    error: Option<String>,
+    result: Option<SnapTradeSyncResponse>,
+}
+
+static SYNC_STATUS: std::sync::OnceLock<std::sync::Mutex<SnapTradeSyncStatus>> =
+    std::sync::OnceLock::new();
+
+fn sync_status_cell() -> &'static std::sync::Mutex<SnapTradeSyncStatus> {
+    SYNC_STATUS.get_or_init(|| {
+        std::sync::Mutex::new(SnapTradeSyncStatus {
+            state: "idle".to_string(),
+            ..Default::default()
+        })
+    })
+}
+
+/// POST /api/dfc/snaptrade/sync - Start a SnapTrade synchronisation.
+///
+/// Returns 202 Accepted immediately. A full sync performs dozens of upstream
+/// calls and routinely runs for several minutes, which exceeds the fixed
+/// timeout of every hosting gateway in front of this service (the request was
+/// being killed with 502 Bad Gateway before any work could be committed). The
+/// work therefore runs off-request and progress is polled via
+/// GET /dfc/snaptrade/sync-status.
 async fn sync_snaptrade(
     State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<SnapTradeSyncResponse>> {
+) -> ApiResult<(axum::http::StatusCode, Json<SnapTradeSyncStatus>)> {
+    // Reject a concurrent start: two syncs would race on the same snapshots.
+    {
+        let mut status = sync_status_cell()
+            .lock()
+            .map_err(|_| ApiError::Internal("Sync status lock poisoned".to_string()))?;
+        if status.state == "running" {
+            return Ok((axum::http::StatusCode::ACCEPTED, Json(status.clone())));
+        }
+        *status = SnapTradeSyncStatus {
+            state: "running".to_string(),
+            started_at: Some(Utc::now().to_rfc3339()),
+            finished_at: None,
+            error: None,
+            result: None,
+        };
+    }
+
+    let accepted = sync_status_cell()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+
+    tokio::spawn(async move {
+        let outcome = run_snaptrade_sync(state).await;
+        if let Ok(mut status) = sync_status_cell().lock() {
+            status.finished_at = Some(Utc::now().to_rfc3339());
+            match outcome {
+                Ok(result) => {
+                    tracing::info!("Background SnapTrade sync succeeded: {:?}", result);
+                    status.state = "succeeded".to_string();
+                    status.result = Some(result);
+                }
+                Err(e) => {
+                    tracing::error!("Background SnapTrade sync failed: {}", e);
+                    status.state = "failed".to_string();
+                    status.error = Some(e.to_string());
+                }
+            }
+        }
+    });
+
+    Ok((axum::http::StatusCode::ACCEPTED, Json(accepted)))
+}
+
+/// GET /api/dfc/snaptrade/sync-status - Progress of the latest background sync.
+async fn sync_status() -> ApiResult<Json<SnapTradeSyncStatus>> {
+    let status = sync_status_cell()
+        .lock()
+        .map_err(|_| ApiError::Internal("Sync status lock poisoned".to_string()))?
+        .clone();
+    Ok(Json(status))
+}
+
+/// Full SnapTrade synchronisation: accounts, activities, holdings and positions.
+///
+/// Runs off-request (see `sync_snaptrade`). A complete sync chains dozens of
+/// upstream calls and takes minutes, which no HTTP gateway will hold open.
+async fn run_snaptrade_sync(state: Arc<AppState>) -> ApiResult<SnapTradeSyncResponse> {
     let config = state
         .snaptrade_config
         .as_ref()
@@ -1084,7 +1173,7 @@ async fn sync_snaptrade(
         );
     }
 
-    Ok(Json(SnapTradeSyncResponse {
+    Ok(SnapTradeSyncResponse {
         accounts_synced: st_accounts.len(),
         activities_synced: bulk_result.upserted,
         raw_activities_from_snaptrade: raw_activities_count,
@@ -1093,7 +1182,7 @@ async fn sync_snaptrade(
         holdings_synced,
         positions_count: total_positions_count,
         cash_balances_count: total_cash_count,
-    }))
+    })
 }
 
 /// GET /api/dfc/snaptrade/sync-diagnostic - Diagnostic endpoint for SnapTrade sync issues
@@ -2042,5 +2131,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/dfc/snaptrade/accounts", get(list_accounts))
         // Sync
         .route("/dfc/snaptrade/sync", post(sync_snaptrade))
+        .route("/dfc/snaptrade/sync-status", get(sync_status))
         .route("/dfc/snaptrade/sync-diagnostic", get(sync_diagnostic))
 }
