@@ -1,5 +1,6 @@
 import { getHoldings, getSnapshots, searchActivities } from "@/adapters";
 import { HistoryChart } from "@/components/history-chart";
+import { runSnaptradeSync } from "@/lib/snaptrade-sync";
 import type { ActivityDetails } from "@/lib/types";
 import {
   Card,
@@ -313,17 +314,7 @@ const AccountPage = () => {
   const handleSnaptradeRefresh = async () => {
     setIsSnaptradeRefreshing(true);
     try {
-      const response = await fetch("/api/v1/dfc/snaptrade/sync", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message || "SnapTrade sync failed");
-      }
-
-      const result = await response.json();
+      const result = await runSnaptradeSync();
 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: [QueryKeys.ACCOUNTS] }),

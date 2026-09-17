@@ -1,3 +1,4 @@
+import { runSnaptradeSync } from "@/lib/snaptrade-sync";
 import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -213,18 +214,10 @@ export default function SnapTradeSettingsPage() {
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      const response = await fetch("/api/v1/dfc/snaptrade/sync", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message || "Sync failed");
-      }
-      const result = await response.json();
+      const result = await runSnaptradeSync();
       toast({
         title: "Synchronisation réussie",
-        description: `✓ ${result.accountsSynced} comptes, ${result.activitiesSynced} activités synchronisés`,
+        description: `✓ ${result.accountsSynced ?? 0} comptes, ${result.activitiesSynced ?? 0} activités synchronisés`,
       });
     } catch (error) {
       console.error("Error syncing:", error);
