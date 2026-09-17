@@ -7,12 +7,12 @@ use crate::{
     models::{Account, AccountUpdate, NewAccount},
 };
 use axum::middleware;
+use axum::response::IntoResponse;
 use axum::{routing::get, Json, Router};
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{
     cors::{Any, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    timeout::TimeoutLayer,
     trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -149,6 +149,9 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
         .finish()
         .expect("valid governor config");
 
+    let default_timeout = config.request_timeout;
+    let long_timeout = config.long_request_timeout;
+
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -169,8 +172,26 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
         .layer(cors)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(TimeoutLayer::new(config.request_timeout))
-        .layer(
+        .layer(middleware::from_fn(move |req: axum::extract::Request, next: middleware::Next| {
+            // A single global timeout cannot serve both interactive endpoints and
+            // broker syncs: the latter chain many upstream calls and legitimately
+            // run for minutes, and were being cut off with 408 Request Timeout.
+            let budget = if is_long_running_path(req.uri().path()) {
+                long_timeout
+            } else {
+                default_timeout
+            };
+            async move {
+                match tokio::time::timeout(budget, next.run(req)).await {
+                    Ok(response) => response,
+                    Err(_) => (
+                        axum::http::StatusCode::REQUEST_TIMEOUT,
+                        "Request timed out",
+                    )
+                        .into_response(),
+                }
+            }
+        }))        .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
                     tracing::info_span!(
@@ -182,4 +203,14 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
+}
+
+/// Endpoints that drive a full broker synchronisation. They fan out to many
+/// upstream provider calls before committing, so they get the long timeout
+/// budget instead of the interactive one.
+fn is_long_running_path(path: &str) -> bool {
+    path.ends_with("/snaptrade/sync")
+        || path.ends_with("/snaptrade/sync-diagnostic")
+        || path.ends_with("/revolut/sync")
+        || path.ends_with("/connect/sync")
 }

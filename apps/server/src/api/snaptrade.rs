@@ -646,18 +646,32 @@ async fn sync_snaptrade(
     // authoritative answer to "what is held today". Without it, Transactions-mode
     // accounts fall back to replaying a 730-day activity ledger, which resurrects
     // every instrument ever bought inside that window as if it were still held.
+    // Fetched concurrently: these are independent upstream round-trips and the
+    // sync endpoint is latency-bound.
+    let position_results = futures::future::join_all(account_map.keys().map(|st_account_id| {
+        let st_account_id = st_account_id.clone();
+        let user_id = user_id.clone();
+        let user_secret = user_secret.clone();
+        async move {
+            let result =
+                snaptrade::list_account_positions(config, &user_id, &user_secret, &st_account_id)
+                    .await;
+            (st_account_id, result)
+        }
+    }))
+    .await;
+
     let mut positions_by_account: HashMap<String, Vec<snaptrade::SnapTradePosition>> =
         HashMap::new();
-    for st_account_id in account_map.keys() {
-        match snaptrade::list_account_positions(config, &user_id, &user_secret, st_account_id).await
-        {
+    for (st_account_id, result) in position_results {
+        match result {
             Ok(positions) => {
                 tracing::info!(
                     "SnapTrade /accounts/{}/positions returned {} positions",
                     st_account_id,
                     positions.len()
                 );
-                positions_by_account.insert(st_account_id.clone(), positions);
+                positions_by_account.insert(st_account_id, positions);
             }
             Err(e) => {
                 tracing::warn!(

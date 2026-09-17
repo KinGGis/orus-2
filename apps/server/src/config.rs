@@ -34,6 +34,9 @@ pub struct Config {
     pub database_url: Option<String>,
     pub cors_allow: Vec<String>,
     pub request_timeout: Duration,
+    /// Timeout applied to long-running endpoints (broker syncs) that legitimately
+    /// exceed the interactive request timeout.
+    pub long_request_timeout: Duration,
     pub static_dir: String,
     pub addons_root: String,
     /// Raw master key (used only for secret-store migration from old raw key)
@@ -80,6 +83,12 @@ impl Config {
             .unwrap_or_else(|_| "30000".into())
             .parse()
             .unwrap_or(30000);
+        // Broker syncs perform many sequential upstream calls plus a bulk upsert and
+        // cannot complete within the general-purpose timeout.
+        let long_timeout_ms: u64 = std::env::var("WF_LONG_REQUEST_TIMEOUT_MS")
+            .unwrap_or_else(|_| "300000".into())
+            .parse()
+            .unwrap_or(300_000);
         let static_dir = std::env::var("WF_STATIC_DIR").unwrap_or_else(|_| "dist".into());
         let secret_key = std::env::var("WF_SECRET_KEY")
             .unwrap_or_else(|_| panic!("WF_SECRET_KEY must be set and contain a 32-byte key"))
@@ -173,6 +182,7 @@ impl Config {
             database_url,
             cors_allow,
             request_timeout: Duration::from_millis(timeout_ms),
+            long_request_timeout: Duration::from_millis(long_timeout_ms.max(timeout_ms)),
             static_dir,
             addons_root,
             raw_secret_key,
