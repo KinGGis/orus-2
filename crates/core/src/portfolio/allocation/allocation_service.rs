@@ -327,11 +327,27 @@ impl AllocationServiceTrait for AllocationService {
             .filter_map(|h| h.instrument.as_ref().map(|i| i.id.clone()))
             .collect();
 
-        // 5. Get all assignments for these assets
+        // 5. Get all assignments for these assets.
+        //
+        // A single unclassifiable asset must not take the whole page down. Cash
+        // holdings carry synthetic instrument ids such as `$CASH-USD`, which the
+        // Postgres repository rejects when it parses them as uuid; propagating
+        // that error made the entire allocations endpoint return 400 and left
+        // every breakdown (classes, sectors, regions, instrument types) empty.
+        // An asset with no resolvable assignments simply has none.
         let mut assignments_by_asset: HashMap<String, Vec<(String, String, i32)>> = HashMap::new();
 
         for asset_id in &asset_ids {
-            let assignments = self.taxonomy_service.get_asset_assignments(asset_id)?;
+            let assignments = match self.taxonomy_service.get_asset_assignments(asset_id) {
+                Ok(assignments) => assignments,
+                Err(e) => {
+                    debug!(
+                        "Skipping taxonomy assignments for asset {}: {}",
+                        asset_id, e
+                    );
+                    continue;
+                }
+            };
             let entries: Vec<(String, String, i32)> = assignments
                 .into_iter()
                 .map(|a| (a.taxonomy_id, a.category_id, a.weight))

@@ -1173,6 +1173,32 @@ async fn run_snaptrade_sync(state: Arc<AppState>) -> ApiResult<SnapTradeSyncResp
         );
     }
 
+    // Enrich newly imported assets so the taxonomy auto-classification can run.
+    // Without a provider profile an asset has no sector, country or instrument
+    // type, so it is assigned to no taxonomy category at all and the Classes /
+    // Sectors / Regions / Instrument Type breakdowns stay empty. The sync already
+    // runs off-request, so this can be awaited instead of being left to a manual
+    // call to /dfc/assets/enrich that nothing ever triggered.
+    match find_unenriched_asset_ids(&state) {
+        Ok((_, unenriched)) if !unenriched.is_empty() => {
+            tracing::info!(
+                "Enriching {} asset(s) after SnapTrade sync to populate classifications",
+                unenriched.len()
+            );
+            match state.asset_service.enrich_assets(unenriched).await {
+                Ok((enriched, skipped, failed)) => tracing::info!(
+                    "Post-sync enrichment complete: {} enriched, {} skipped, {} failed",
+                    enriched,
+                    skipped,
+                    failed
+                ),
+                Err(e) => tracing::warn!("Post-sync enrichment failed: {}", e),
+            }
+        }
+        Ok(_) => tracing::info!("No assets need enrichment after SnapTrade sync"),
+        Err(e) => tracing::warn!("Could not determine assets needing enrichment: {}", e),
+    }
+
     Ok(SnapTradeSyncResponse {
         accounts_synced: st_accounts.len(),
         activities_synced: bulk_result.upserted,
@@ -1808,23 +1834,17 @@ async fn valuation_diagnostic(
     })))
 }
 
-/// POST /dfc/assets/enrich - Force enrichment of assets missing profile data
-/// 
-/// This endpoint finds all assets that have not been enriched (no profile metadata)
-/// and triggers the enrichment process to fetch sector, region, and other data from Yahoo.
-async fn enrich_unenriched_assets(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
-    use wealthfolio_core::assets::AssetServiceTrait;
-    
-    // Get all assets
-    let all_assets = state.asset_service.get_assets()
+/// Assets that still lack provider profile data (sector, country, instrument type).
+///
+/// Enrichment is what feeds the taxonomy auto-classification, and therefore the
+/// Classes / Sectors / Regions / Instrument Type breakdowns. Assets created by an
+/// import are minimal stubs with none of it.
+fn find_unenriched_asset_ids(state: &Arc<AppState>) -> ApiResult<(usize, Vec<String>)> {
+    let all_assets = state
+        .asset_service
+        .get_assets()
         .map_err(|e| ApiError::Internal(format!("Failed to list assets: {}", e)))?;
-    
-    // Find assets that need enrichment:
-    // - MARKET quote mode (not MANUAL)
-    // - No profile metadata (metadata.profile is None or empty)
-    // - Has instrument_symbol (can be looked up)
+
     let unenriched: Vec<String> = all_assets
         .iter()
         .filter(|a| {
@@ -1841,15 +1861,27 @@ async fn enrich_unenriched_assets(
         })
         .map(|a| a.id.clone())
         .collect();
-    
+
+    Ok((all_assets.len(), unenriched))
+}
+
+/// POST /dfc/assets/enrich - Force enrichment of assets missing profile data
+/// 
+/// This endpoint finds all assets that have not been enriched (no profile metadata)
+/// and triggers the enrichment process to fetch sector, region, and other data from Yahoo.
+async fn enrich_unenriched_assets(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (total_assets, unenriched) = find_unenriched_asset_ids(&state)?;
+
     let count = unenriched.len();
     tracing::info!("Found {} assets needing enrichment", count);
-    
+
     if unenriched.is_empty() {
         return Ok(Json(serde_json::json!({
             "success": true,
             "message": "All assets already enriched",
-            "totalAssets": all_assets.len(),
+            "totalAssets": total_assets,
             "enrichedCount": 0,
         })));
     }
@@ -1873,7 +1905,7 @@ async fn enrich_unenriched_assets(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": format!("Enrichment started in background for {} assets. Check server logs for progress.", count),
-        "totalAssets": all_assets.len(),
+        "totalAssets": total_assets,
         "assetsNeedingEnrichment": count,
     })))
 }
