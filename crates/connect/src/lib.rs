@@ -7,6 +7,8 @@
 pub mod broker;
 pub mod broker_ingest;
 pub mod client;
+#[cfg(feature = "broker")]
+pub mod ibkr;
 pub mod platform;
 pub mod token_lifecycle;
 
@@ -20,6 +22,9 @@ pub use broker::{
     SyncConnectionsResponse, SyncOrchestrator, SyncProgressPayload, SyncProgressReporter,
     SyncResult, SyncStatus, UserInfo, UserTeam,
 };
+
+#[cfg(feature = "broker")]
+pub use ibkr::{IbkrMcpClient, IbkrTokenManager, IbkrTokenStore};
 
 // Re-export the HTTP client and public functions
 pub use client::{fetch_subscription_plans_public, ConnectApiClient, DEFAULT_CLOUD_API_URL};

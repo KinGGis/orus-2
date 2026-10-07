@@ -101,6 +101,12 @@ const settingsSections = [
         icon: <Icons.Link className="size-5" />,
       },
       {
+        title: "Interactive Brokers",
+        href: "ibkr",
+        subtitle: "Direct MCP connection",
+        icon: <Icons.Link className="size-5" />,
+      },
+      {
         title: "Market Data",
         href: "market-data",
         subtitle: "Providers, sync, and imports",

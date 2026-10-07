@@ -228,12 +228,12 @@ struct DeviceSyncSnapshotUploadResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Progress reporter that publishes events to the EventBus for SSE delivery.
-struct EventBusProgressReporter {
+pub(crate) struct EventBusProgressReporter {
     event_bus: EventBus,
 }
 
 impl EventBusProgressReporter {
-    fn new(event_bus: EventBus) -> Self {
+    pub(crate) fn new(event_bus: EventBus) -> Self {
         Self { event_bus }
     }
 }

@@ -35,6 +35,8 @@ mod exchange_rates;
 mod goals;
 mod health;
 mod holdings;
+#[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+mod ibkr;
 mod limits;
 mod market_data;
 mod net_worth;
@@ -122,7 +124,9 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
 
     #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
     {
-        protected_api = protected_api.merge(connect::router());
+        protected_api = protected_api
+            .merge(connect::router())
+            .merge(ibkr::router());
     }
 
     let protected_api = protected_api.route(
@@ -213,4 +217,6 @@ fn is_long_running_path(path: &str) -> bool {
         || path.ends_with("/snaptrade/sync-diagnostic")
         || path.ends_with("/revolut/sync")
         || path.ends_with("/connect/sync")
+        || path.ends_with("/ibkr/sync")
+        || path.ends_with("/ibkr/diagnostic")
 }
