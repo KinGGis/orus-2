@@ -129,8 +129,21 @@ pub struct IbkrPerformanceAccount {
     pub periods: Option<std::collections::HashMap<String, IbkrPerformancePeriod>>,
 }
 
-/// One performance window. `dates`, `nav` and `cps` are parallel arrays of
-/// equal length; `dates` are `yyyymmdd` strings and `cps` holds cumulative
+/// Daily OHLCV bars returned by the `get_price_history` tool. The arrays are
+/// parallel; `time` holds epoch milliseconds as strings on the live feed, but
+/// IBKR also documents `yyyymmdd`, so both forms are accepted.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct IbkrPriceHistory {
+    pub time: Option<Vec<String>>,
+    pub open: Option<Vec<f64>>,
+    pub high: Option<Vec<f64>>,
+    pub low: Option<Vec<f64>>,
+    pub close: Option<Vec<f64>>,
+    pub volume: Option<Vec<f64>>,
+    pub error: Option<String>,
+}
+
+/// One performance window. `dates`, `nav` and `cps` are parallel arrays of/// equal length; `dates` are `yyyymmdd` strings and `cps` holds cumulative
 /// returns as fractions measured from the start of the window.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct IbkrPerformancePeriod {

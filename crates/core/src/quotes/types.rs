@@ -77,6 +77,7 @@ impl ProviderId {
     pub const FINNHUB: &'static str = "FINNHUB";
     pub const US_TREASURY_CALC: &'static str = "US_TREASURY_CALC";
     pub const BOERSE_FRANKFURT: &'static str = "BOERSE_FRANKFURT";
+    pub const IBKR: &'static str = "IBKR";
     pub const OPENFIGI: &'static str = "OPENFIGI";
 
     pub fn new(id: impl Into<String>) -> Self {
@@ -109,6 +110,10 @@ impl ProviderId {
 
     pub fn boerse_frankfurt() -> Self {
         Self(Self::BOERSE_FRANKFURT.to_string())
+    }
+
+    pub fn ibkr() -> Self {
+        Self(Self::IBKR.to_string())
     }
 
     pub fn openfigi() -> Self {
@@ -356,6 +361,7 @@ impl From<DataSource> for QuoteSource {
             DataSource::UsTreasuryCalc => QuoteSource::Provider(ProviderId::us_treasury_calc()),
             DataSource::BoerseFrankfurt => QuoteSource::Provider(ProviderId::boerse_frankfurt()),
             DataSource::InternalBondModel => QuoteSource::Manual, // Internally calculated — treat as manual for source tracking
+            DataSource::Ibkr => QuoteSource::Provider(ProviderId::ibkr()),
         }
     }
 }
@@ -369,6 +375,7 @@ impl From<QuoteSource> for DataSource {
                 ProviderId::ALPHA_VANTAGE => DataSource::AlphaVantage,
                 ProviderId::MARKETDATA_APP => DataSource::MarketDataApp,
                 ProviderId::METAL_PRICE_API => DataSource::MetalPriceApi,
+                ProviderId::IBKR => DataSource::Ibkr,
                 _ => DataSource::Manual, // Unknown providers default to Manual for compatibility
             },
         }

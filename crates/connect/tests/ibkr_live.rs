@@ -264,3 +264,72 @@ async fn maps_every_live_trade_and_prices_every_position() {
     println!("non-USD positions carrying a price={foreign}");
     assert!(foreign > 0, "expected non-USD listings in this account");
 }
+
+/// Every held instrument must come back with a usable year of daily closes.
+///
+/// This is the series that values the portfolio on past days. If IBKR refuses
+/// a contract, that position falls back to being worth zero in the history,
+/// which is the exact defect this import exists to remove.
+#[tokio::test]
+#[ignore = "requires live IBKR credentials and network access"]
+async fn supplies_a_price_history_for_every_position() {
+    let client_id = std::env::var("IBKR_CLIENT_ID").expect("IBKR_CLIENT_ID");
+    let refresh_token = std::env::var("IBKR_REFRESH_TOKEN").expect("IBKR_REFRESH_TOKEN");
+
+    let store = Arc::new(EnvTokenStore {
+        token: Mutex::new(Some(refresh_token)),
+    });
+    let tokens = Arc::new(IbkrTokenManager::new(http_client(), client_id, store));
+    let client = IbkrMcpClient::new(http_client(), tokens);
+
+    let accounts = client.list_accounts(None).await.expect("list_accounts");
+    let account_id = accounts[0].id.clone().expect("account id");
+
+    let holdings = client
+        .get_account_holdings(&account_id)
+        .await
+        .expect("holdings");
+    let positions = holdings.positions.unwrap_or_default();
+
+    let mut without_history: Vec<String> = Vec::new();
+    for position in &positions {
+        let symbol = position
+            .symbol
+            .as_ref()
+            .and_then(|s| s.symbol.as_ref())
+            .and_then(|s| s.symbol.clone())
+            .unwrap_or_else(|| "<unnamed>".to_string());
+
+        let Some(contract_id) = position
+            .symbol
+            .as_ref()
+            .and_then(|s| s.id.as_ref())
+            .and_then(|id| id.parse::<i64>().ok())
+        else {
+            without_history.push(format!("{symbol} (no contract id)"));
+            continue;
+        };
+
+        match client.price_history(contract_id, "STK", "FIVE_YEARS").await {
+            Ok(bars) if bars.len() >= 100 => {
+                let first = bars.first().unwrap();
+                let last = bars.last().unwrap();
+                println!(
+                    "{symbol}: {} bars, {} .. {} (close {} -> {})",
+                    bars.len(),
+                    first.date,
+                    last.date,
+                    first.close,
+                    last.close
+                );
+            }
+            Ok(bars) => without_history.push(format!("{symbol} (only {} bars)", bars.len())),
+            Err(err) => without_history.push(format!("{symbol} ({err})")),
+        }
+    }
+
+    assert!(
+        without_history.is_empty(),
+        "positions without a usable price history: {without_history:?}"
+    );
+}
