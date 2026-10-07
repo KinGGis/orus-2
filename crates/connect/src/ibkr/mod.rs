@@ -11,7 +11,10 @@ pub mod models;
 pub mod oauth;
 
 pub use allocation::{fetch_allocations, map_allocations, AllocationResponse};
-pub use client::{IbkrMcpClient, IBKR_ACCOUNT_ID, IBKR_CONNECTION_ID, IBKR_SOURCE_SYSTEM};
+pub use client::{
+    IbkrMcpClient, IbkrNavHistory, IbkrPriceBar, IBKR_ACCOUNT_ID, IBKR_CONNECTION_ID,
+    IBKR_SOURCE_SYSTEM,
+};
 pub use mcp::McpClient;
 pub use oauth::{
     build_authorize_url, generate_pkce, generate_state, http_client, register_client,

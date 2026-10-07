@@ -21,6 +21,8 @@ pub const DATA_SOURCE_FINNHUB: &str = "FINNHUB";
 pub const DATA_SOURCE_US_TREASURY_CALC: &str = "US_TREASURY_CALC";
 pub const DATA_SOURCE_BOERSE_FRANKFURT: &str = "BOERSE_FRANKFURT";
 pub const DATA_SOURCE_INTERNAL_BOND_MODEL: &str = "INTERNAL_BOND_MODEL";
+/// Prices reported by Interactive Brokers through its MCP server.
+pub const DATA_SOURCE_IBKR: &str = "IBKR";
 
 // =============================================================================
 // Data Source
@@ -55,6 +57,8 @@ pub enum DataSource {
     /// Internal YTM-based dirty price calculation (no external data source)
     #[serde(rename = "INTERNAL_BOND_MODEL")]
     InternalBondModel,
+    /// Interactive Brokers - prices for the instruments the account holds
+    Ibkr,
     /// Manual entry by user
     #[default]
     Manual,
@@ -72,6 +76,7 @@ impl DataSource {
             DataSource::UsTreasuryCalc => DATA_SOURCE_US_TREASURY_CALC,
             DataSource::BoerseFrankfurt => DATA_SOURCE_BOERSE_FRANKFURT,
             DataSource::InternalBondModel => DATA_SOURCE_INTERNAL_BOND_MODEL,
+            DataSource::Ibkr => DATA_SOURCE_IBKR,
             DataSource::Manual => DATA_SOURCE_MANUAL,
         }
     }
@@ -94,6 +99,7 @@ impl From<&str> for DataSource {
             DATA_SOURCE_US_TREASURY_CALC => DataSource::UsTreasuryCalc,
             DATA_SOURCE_BOERSE_FRANKFURT => DataSource::BoerseFrankfurt,
             DATA_SOURCE_INTERNAL_BOND_MODEL => DataSource::InternalBondModel,
+            DATA_SOURCE_IBKR => DataSource::Ibkr,
             _ => DataSource::Manual,
         }
     }

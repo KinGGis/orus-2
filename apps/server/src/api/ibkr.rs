@@ -5,6 +5,7 @@
 //! refresh token, which is persisted in the secret store and keeps subsequent
 //! syncs unattended.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -27,7 +28,7 @@ use wealthfolio_core::portfolio::valuation::{
     DailyAccountValuation, ValuationRecalcMode, ValuationSource,
 };
 use wealthfolio_core::portfolio::snapshot::SnapshotRecalcMode;
-use wealthfolio_core::quotes::MarketSyncMode;
+use wealthfolio_core::quotes::{DataSource, MarketSyncMode, Quote};
 use wealthfolio_core::secrets::SecretStore;
 
 use crate::{
@@ -408,6 +409,13 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
 
     info!("[IBKR] Sync completed: {}", result.message);
 
+    // IBKR prices its own contracts, which our market data provider cannot
+    // resolve from a bare foreign ticker. Importing that history first means
+    // the recalculation triggered below values every past day properly.
+    if let Err(err) = import_price_history(&state, &client).await {
+        warn!("[IBKR] Price history import skipped: {}", err);
+    }
+
     // The MCP publishes IBKR's own daily net asset value. It is the figure the
     // broker itself reports, so it replaces the locally computed market value
     // whenever we have it — that is what repairs the days where a European
@@ -418,6 +426,125 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
     }
 
     Ok(Json(result))
+}
+
+/// Import one year of daily closing prices from IBKR for every instrument the
+/// account holds.
+///
+/// Our market data provider cannot resolve the bare foreign tickers IBKR
+/// reports (`AKE`, `RACE`, `SRT`…), so those positions had no price on any past
+/// day and were valued at zero throughout the history. IBKR prices its own
+/// contracts by `contract_id`, which removes the ambiguity entirely.
+///
+/// These are genuine provider quotes, not the single-day broker mark, so they
+/// are stored under `DataSource::Ibkr` and the valuation service treats them as
+/// a real price series. Because quotes are forward-filled when valuing, one bar
+/// per trading day also covers weekends and holidays.
+///
+/// Five years is deliberate rather than generous. Once an asset has any
+/// provider quote, the valuation service treats a day without one as a data gap
+/// and discards that whole day. A window shorter than the holding period would
+/// therefore delete the oldest days from the chart instead of repairing them.
+const PRICE_HISTORY_PERIOD: &str = "FIVE_YEARS";
+
+async fn import_price_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> CoreResult<usize> {
+    use wealthfolio_connect::broker::BrokerApiClient;
+
+    let holdings = client.get_account_holdings(IBKR_ACCOUNT_ID).await?;
+    let positions = holdings.positions.unwrap_or_default();
+    if positions.is_empty() {
+        return Ok(0);
+    }
+
+    let assets_by_symbol: HashMap<String, String> = state
+        .asset_service
+        .get_assets()?
+        .into_iter()
+        .filter_map(|asset| {
+            let symbol = asset.instrument_symbol.or(asset.display_code)?;
+            Some((symbol.to_uppercase(), asset.id))
+        })
+        .collect();
+
+    let now = Utc::now();
+    let mut quotes: Vec<Quote> = Vec::new();
+
+    for position in &positions {
+        let Some(symbol) = position
+            .symbol
+            .as_ref()
+            .and_then(|s| s.symbol.as_ref())
+            .and_then(|s| s.symbol.clone())
+        else {
+            continue;
+        };
+
+        let Some(contract_id) = position
+            .symbol
+            .as_ref()
+            .and_then(|s| s.id.as_ref())
+            .and_then(|id| id.parse::<i64>().ok())
+        else {
+            warn!("[IBKR] No contract id for {symbol}, skipping its price history");
+            continue;
+        };
+
+        let Some(asset_id) = assets_by_symbol.get(&symbol.to_uppercase()) else {
+            warn!("[IBKR] No local asset matches {symbol}, skipping its price history");
+            continue;
+        };
+
+        let currency = position
+            .currency
+            .as_ref()
+            .and_then(|c| c.code.clone())
+            .unwrap_or_default();
+
+        let bars = match client
+            .price_history(contract_id, "STK", PRICE_HISTORY_PERIOD)
+            .await
+        {
+            Ok(bars) => bars,
+            Err(err) => {
+                warn!("[IBKR] Price history unavailable for {symbol}: {err}");
+                continue;
+            }
+        };
+
+        for bar in bars {
+            let timestamp = bar
+                .date
+                .and_hms_opt(12, 0, 0)
+                .map(|dt| dt.and_utc())
+                .unwrap_or(now);
+
+            quotes.push(Quote {
+                id: format!("{}_{}_{}", asset_id, bar.date, DataSource::Ibkr.as_str()),
+                asset_id: asset_id.clone(),
+                timestamp,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                adjclose: bar.close,
+                volume: bar.volume,
+                currency: currency.clone(),
+                data_source: DataSource::Ibkr,
+                created_at: now,
+                notes: None,
+            });
+        }
+    }
+
+    if quotes.is_empty() {
+        return Ok(0);
+    }
+
+    let requested = quotes.len();
+    let saved = state.quote_service.bulk_upsert_quotes(quotes).await?;
+    info!("[IBKR] Imported {saved}/{requested} historical prices");
+
+    Ok(saved)
 }
 
 /// Persist IBKR's reported daily NAV as broker valuations, then ask for a

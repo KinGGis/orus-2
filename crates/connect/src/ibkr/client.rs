@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -17,7 +17,7 @@ use wealthfolio_core::errors::{Error, Result};
 use super::mcp::McpClient;
 use super::models::{
     IbkrAccountSummary, IbkrBalancesResponse, IbkrPerformanceAccount, IbkrPerformanceResponse,
-    IbkrPositionsResponse, IbkrTrade, IbkrTradesResponse, TRADE_PERIODS,
+    IbkrPositionsResponse, IbkrPriceHistory, IbkrTrade, IbkrTradesResponse, TRADE_PERIODS,
 };
 use super::oauth::IbkrTokenManager;
 use crate::broker::{
@@ -88,6 +88,89 @@ fn longest_nav_series(account: &IbkrPerformanceAccount) -> Vec<(NaiveDate, Decim
 /// IBKR reports NAV with far more precision than is meaningful for money.
 const NAV_DECIMAL_PRECISION: u32 = 8;
 
+/// One daily bar of an instrument's price history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IbkrPriceBar {
+    pub date: NaiveDate,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: Decimal,
+}
+
+/// Reads one timestamp of a price history.
+///
+/// IBKR's live feed returns epoch milliseconds rendered as a string, while the
+/// documentation also shows `yyyymmdd`. Accepting both costs nothing and avoids
+/// silently importing an empty history if the feed changes shape.
+fn parse_bar_date(raw: &str) -> Option<NaiveDate> {
+    let trimmed = raw.trim();
+
+    if let Ok(millis) = trimmed.parse::<i64>() {
+        // A bare yyyymmdd also parses as an integer, so discriminate on
+        // magnitude: any plausible epoch in milliseconds is far larger.
+        if trimmed.len() == 8 {
+            if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y%m%d") {
+                return Some(date);
+            }
+        }
+        return DateTime::from_timestamp_millis(millis).map(|dt| dt.date_naive());
+    }
+
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|dt| dt.date_naive())
+        })
+}
+
+/// Turns IBKR's parallel OHLCV arrays into bars, keeping only the days that
+/// carry a usable closing price. The optional arrays are zipped by index, so a
+/// shorter one simply yields zero for the missing field rather than shifting
+/// every subsequent bar.
+fn price_bars(history: &IbkrPriceHistory) -> Vec<IbkrPriceBar> {
+    let (Some(times), Some(closes)) = (history.time.as_ref(), history.close.as_ref()) else {
+        return Vec::new();
+    };
+
+    let at = |series: &Option<Vec<f64>>, index: usize| -> Option<Decimal> {
+        series
+            .as_ref()
+            .and_then(|values| values.get(index))
+            .and_then(|value| Decimal::from_f64_retain(*value))
+            .map(|value| value.round_dp(NAV_DECIMAL_PRECISION))
+    };
+
+    let mut bars: Vec<IbkrPriceBar> = times
+        .iter()
+        .zip(closes.iter())
+        .enumerate()
+        .filter_map(|(index, (raw_date, close))| {
+            let date = parse_bar_date(raw_date)?;
+            let close = Decimal::from_f64_retain(*close)?.round_dp(NAV_DECIMAL_PRECISION);
+            if close <= Decimal::ZERO {
+                return None;
+            }
+
+            Some(IbkrPriceBar {
+                date,
+                open: at(&history.open, index).unwrap_or(close),
+                high: at(&history.high, index).unwrap_or(close),
+                low: at(&history.low, index).unwrap_or(close),
+                close,
+                volume: at(&history.volume, index).unwrap_or(Decimal::ZERO),
+            })
+        })
+        .collect();
+
+    bars.sort_by_key(|bar| bar.date);
+    bars.dedup_by_key(|bar| bar.date);
+    bars
+}
+
 pub struct IbkrMcpClient {
     mcp: McpClient,
     /// Trades are fetched as five overlapping windows; caching the merged,
@@ -151,8 +234,46 @@ impl IbkrMcpClient {
         })
     }
 
-    /// Fetch every available trade window and merge them.
+    /// Daily closing prices for one contract, straight from IBKR.
     ///
+    /// This is what makes IBKR the pricing authority for the instruments the
+    /// account holds: the European listings it reports have no counterpart in
+    /// our market data provider, so without this they would be valued at zero
+    /// on every past day.
+    pub async fn price_history(
+        &self,
+        contract_id: i64,
+        security_type: &str,
+        period: &str,
+    ) -> Result<Vec<IbkrPriceBar>> {
+        let value = self
+            .mcp
+            .call_tool(
+                "get_price_history",
+                json!({
+                    "contract_id": contract_id,
+                    "security_type": security_type,
+                    "step": "ONE_DAY",
+                    "period": period,
+                    "outside_rth": false,
+                }),
+            )
+            .await?;
+
+        let parsed: IbkrPriceHistory = serde_json::from_value(value).map_err(|e| {
+            Error::Unexpected(format!("Unexpected IBKR price history shape: {e}"))
+        })?;
+
+        if let Some(error) = parsed.error.as_deref() {
+            return Err(Error::Unexpected(format!(
+                "IBKR price history for contract {contract_id}: {error}"
+            )));
+        }
+
+        Ok(price_bars(&parsed))
+    }
+
+    /// Fetch every available trade window and merge them.    ///
     /// The windows overlap (year-to-date covers the recent quarters), so
     /// deduplication by `trade_id` is mandatory — without it a sync would
     /// double-count roughly a third of the history.
@@ -529,7 +650,7 @@ impl BrokerApiClient for IbkrMcpClient {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use super::super::models::IbkrPerformancePeriod;
+    use super::super::models::{IbkrPerformancePeriod, IbkrPriceHistory};
 
     fn trade(id: &str, side: &str, sec_type: &str) -> IbkrTrade {
         IbkrTrade {
@@ -700,5 +821,67 @@ mod tests {
     #[test]
     fn nav_series_is_empty_without_periods() {
         assert!(longest_nav_series(&IbkrPerformanceAccount::default()).is_empty());
+    }
+
+    #[test]
+    fn bar_dates_accept_epoch_millis_and_yyyymmdd() {
+        // 2026-10-07T00:00:00Z
+        assert_eq!(
+            parse_bar_date("1791331200000"),
+            NaiveDate::from_ymd_opt(2026, 10, 7)
+        );
+        assert_eq!(
+            parse_bar_date("20261007"),
+            NaiveDate::from_ymd_opt(2026, 10, 7)
+        );
+        assert_eq!(
+            parse_bar_date("2026-10-07"),
+            NaiveDate::from_ymd_opt(2026, 10, 7)
+        );
+        assert_eq!(parse_bar_date("not-a-date"), None);
+    }
+
+    #[test]
+    fn price_bars_fill_missing_series_from_the_close() {
+        let history = IbkrPriceHistory {
+            time: Some(vec!["20261006".into(), "20261007".into()]),
+            close: Some(vec![10.0, 11.0]),
+            open: Some(vec![9.5]),
+            high: None,
+            low: None,
+            volume: None,
+            error: None,
+        };
+
+        let bars = price_bars(&history);
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].open, dec!(9.5));
+        // No `open` entry for the second bar: it falls back to its own close
+        // rather than borrowing the previous bar's value.
+        assert_eq!(bars[1].open, dec!(11));
+        assert_eq!(bars[1].high, dec!(11));
+        assert_eq!(bars[1].volume, Decimal::ZERO);
+    }
+
+    #[test]
+    fn price_bars_drop_unusable_days_and_sort() {
+        let history = IbkrPriceHistory {
+            time: Some(vec!["20261007".into(), "oops".into(), "20261005".into()]),
+            close: Some(vec![11.0, 5.0, 0.0]),
+            ..Default::default()
+        };
+
+        let bars = price_bars(&history);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].date, NaiveDate::from_ymd_opt(2026, 10, 7).unwrap());
+    }
+
+    #[test]
+    fn price_bars_are_empty_without_closes() {
+        let history = IbkrPriceHistory {
+            time: Some(vec!["20261007".into()]),
+            ..Default::default()
+        };
+        assert!(price_bars(&history).is_empty());
     }
 }
