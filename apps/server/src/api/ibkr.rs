@@ -86,6 +86,63 @@ fn create_ibkr_client(state: &AppState) -> ApiResult<IbkrMcpClient> {
 }
 
 // ============================================================================
+// Allocation override
+// ============================================================================
+
+/// IBKR-sourced allocations for an account, or `None` when the local
+/// computation should be used instead.
+///
+/// The local allocation service classifies holdings by joining them against our
+/// taxonomy tables, so any unclassified asset lands in "Unknown" and the cards
+/// stop reconciling. IBKR already classifies everything it custodies, so for
+/// the IBKR account we serve their breakdown directly.
+///
+/// Returns `None` rather than an error on failure: a broker outage should leave
+/// the cards falling back to local data, not blank the page.
+pub(crate) async fn allocations_override(
+    state: &AppState,
+    account_id: &str,
+) -> Option<wealthfolio_core::portfolio::allocation::PortfolioAllocations> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+    use wealthfolio_core::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
+
+    let refresh_token = state.secret_store.get_secret(IBKR_REFRESH_TOKEN_KEY).ok()??;
+    if refresh_token.is_empty() {
+        return None;
+    }
+
+    let accounts = state.account_service.get_active_non_archived_accounts().ok()?;
+    let ibkr = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))?;
+
+    // Serving IBKR's numbers for the whole portfolio is only correct when there
+    // is nothing else to aggregate with them.
+    let applies = account_id == ibkr.id
+        || (account_id == PORTFOLIO_TOTAL_ACCOUNT_ID && accounts.len() == 1);
+
+    if !applies {
+        return None;
+    }
+
+    let client = match create_ibkr_client(state) {
+        Ok(client) => client,
+        Err(err) => {
+            info!("[IBKR] Not serving allocations, falling back to local: {err}");
+            return None;
+        }
+    };
+
+    match client.allocations().await {
+        Ok(allocations) => Some(allocations),
+        Err(err) => {
+            error!("[IBKR] Allocation fetch failed, falling back to local: {err}");
+            None
+        }
+    }
+}
+
+// ============================================================================
 // Routes
 // ============================================================================
 

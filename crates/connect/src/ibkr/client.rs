@@ -54,8 +54,15 @@ impl IbkrMcpClient {
         }
     }
 
-    async fn account_summary(&self) -> Result<IbkrAccountSummary> {
-        let value = self.mcp.call_tool("get_account_summary", json!({})).await?;
+    /// Portfolio allocations straight from IBKR's own classification, used in
+    /// place of the local taxonomy join for this account.
+    pub async fn allocations(
+        &self,
+    ) -> Result<wealthfolio_core::portfolio::allocation::PortfolioAllocations> {
+        super::allocation::fetch_allocations(&self.mcp).await
+    }
+
+    async fn account_summary(&self) -> Result<IbkrAccountSummary> {        let value = self.mcp.call_tool("get_account_summary", json!({})).await?;
         serde_json::from_value(value)
             .map_err(|e| Error::Unexpected(format!("Unexpected IBKR account summary shape: {e}")))
     }

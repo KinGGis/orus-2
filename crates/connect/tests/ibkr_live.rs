@@ -106,4 +106,60 @@ async fn fetches_real_holdings_and_trades() {
         all.data.len(),
         "deduplication by trade_id failed"
     );
+
+    // Allocations must reconcile with the NAV the broker reports, which is the
+    // whole point of sourcing them from IBKR instead of our taxonomy join.
+    let allocations = client.allocations().await.expect("allocations");
+    println!(
+        "allocations total_value={} asset_classes={} sectors={} regions={} instruments={} countries={}",
+        allocations.total_value,
+        allocations.asset_classes.categories.len(),
+        allocations.sectors.categories.len(),
+        allocations.regions.categories.len(),
+        allocations.security_types.categories.len(),
+        allocations
+            .custom_groups
+            .first()
+            .map(|g| g.categories.len())
+            .unwrap_or(0),
+    );
+
+    let nav = account
+        .balance
+        .as_ref()
+        .and_then(|b| b.total.as_ref())
+        .and_then(|t| t.amount)
+        .expect("account nav");
+    let nav = rust_decimal::Decimal::from_f64_retain(nav).expect("nav as decimal");
+
+    let drift = (allocations.total_value - nav).abs();
+    assert!(
+        drift <= rust_decimal::Decimal::new(5, 0),
+        "allocation total {} drifted from NAV {nav} by {drift}",
+        allocations.total_value
+    );
+
+    for taxonomy in [
+        &allocations.asset_classes,
+        &allocations.sectors,
+        &allocations.regions,
+        &allocations.security_types,
+    ] {
+        assert!(
+            !taxonomy.categories.is_empty(),
+            "{} came back empty",
+            taxonomy.taxonomy_id
+        );
+        assert!(
+            taxonomy.categories.iter().all(|c| c.value > rust_decimal::Decimal::ZERO),
+            "{} contains a non-positive slice",
+            taxonomy.taxonomy_id
+        );
+        let sum: rust_decimal::Decimal = taxonomy.categories.iter().map(|c| c.percentage).sum();
+        assert!(
+            (sum - rust_decimal::Decimal::new(100, 0)).abs() <= rust_decimal::Decimal::new(5, 1),
+            "{} percentages summed to {sum}",
+            taxonomy.taxonomy_id
+        );
+    }
 }
