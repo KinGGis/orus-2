@@ -40,6 +40,7 @@ import ConnectSettingsPage from "./pages/settings/wealthfolio-connect/connect-se
 import RevolutCallbackPage from "./pages/settings/revolut/revolut-callback-page";
 import RevolutSettingsPage from "./pages/settings/revolut/revolut-settings-page";
 import { SnapTradeCallbackPage, SnapTradeSettingsPage } from "./pages/settings/snaptrade";
+import { IbkrCallbackPage, IbkrSettingsPage } from "./pages/settings/ibkr";
 // Settings Account Pages
 import { AccountPage as SettingsAccountPage, ProfilePage as SettingsProfilePage, PasswordPage as SettingsPasswordPage } from "./pages/settings/account";
 // Orus Integration Pages
@@ -96,6 +97,7 @@ export function AppRoutes() {
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
         <Route path="/revolut/callback" element={<RevolutCallbackPage />} />
         <Route path="/snaptrade/callback" element={<SnapTradeCallbackPage />} />
+        <Route path="/ibkr/callback" element={<IbkrCallbackPage />} />
 
         {/* Global Authentication - No layout needed */}
         <Route path="/login" element={<LoginPage />} />
@@ -181,6 +183,7 @@ export function AppRoutes() {
             <Route path="connect" element={<ConnectSettingsPage />} />
             <Route path="revolut" element={<RevolutSettingsPage />} />
             <Route path="snaptrade" element={<SnapTradeSettingsPage />} />
+            <Route path="ibkr" element={<IbkrSettingsPage />} />
             <Route path="ai-providers" element={<AiProvidersPage />} />
             <Route path="addons" element={<AddonSettingsPage />} />
             <Route path="orus" element={<OrusSettingsPage />} />

@@ -19,6 +19,10 @@ log = { workspace = true }
 reqwest = { workspace = true }
 base64 = "0.22"
 
+# OAuth PKCE (IBKR MCP)
+sha2 = { workspace = true }
+rand = { workspace = true }
+
 [features]
 default = ["broker"]
 broker = []
