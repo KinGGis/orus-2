@@ -125,4 +125,16 @@ pub struct IbkrPerformanceAccount {
     /// Account inception date in `yyyymmdd`.
     pub start: Option<String>,
     pub end: Option<String>,
+    /// Keyed by window label (`1D`, `7D`, `MTD`, `1M`, `YTD`, `1Y`).
+    pub periods: Option<std::collections::HashMap<String, IbkrPerformancePeriod>>,
+}
+
+/// One performance window. `dates`, `nav` and `cps` are parallel arrays of
+/// equal length; `dates` are `yyyymmdd` strings and `cps` holds cumulative
+/// returns as fractions measured from the start of the window.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct IbkrPerformancePeriod {
+    pub dates: Option<Vec<String>>,
+    pub nav: Option<Vec<f64>>,
+    pub cps: Option<Vec<f64>>,
 }

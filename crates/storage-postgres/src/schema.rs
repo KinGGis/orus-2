@@ -152,6 +152,7 @@ diesel::table! {
         cost_basis -> Numeric,
         net_contribution -> Numeric,
         calculated_at -> Timestamptz,
+        source -> Text,
     }
 }
 

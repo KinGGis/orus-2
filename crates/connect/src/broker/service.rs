@@ -34,12 +34,66 @@ use wealthfolio_core::events::{DomainEvent, DomainEventSink, NoOpDomainEventSink
 use wealthfolio_core::portfolio::snapshot::{
     AccountStateSnapshot, Position, SnapshotRepositoryTrait, SnapshotServiceTrait, SnapshotSource,
 };
+use wealthfolio_core::quotes::{DataSource, Quote, QuoteServiceTrait};
 use wealthfolio_core::utils::time_utils::valuation_date_today;
 
 const DEFAULT_BROKERAGE_PROVIDER: &str = "snaptrade";
 /// Precision used for holdings normalization/diff comparisons.
 /// Higher than generic valuation precision to preserve crypto fidelity.
 const HOLDINGS_DECIMAL_PRECISION: u32 = 12;
+
+/// Builds MANUAL quotes from the prices the broker reported for each position.
+///
+/// Valuation reads the latest quote per asset, so a position whose symbol the
+/// market data provider cannot resolve (bare foreign tickers like `AKE` or
+/// `BRBY`) would otherwise be valued at zero. Storing the broker's own mark as
+/// a MANUAL quote also protects it: `upsert_quotes` refuses to overwrite a
+/// MANUAL day with a provider quote.
+fn build_broker_quotes(
+    position_data: &[(String, Decimal, Decimal, Decimal, String)],
+    spec_key_to_asset_id: &HashMap<String, String>,
+    day: chrono::NaiveDate,
+    now: DateTime<Utc>,
+) -> Vec<Quote> {
+    let date = day.format("%Y-%m-%d").to_string();
+    let timestamp = day
+        .and_hms_opt(12, 0, 0)
+        .map(|dt| dt.and_utc())
+        .unwrap_or(now);
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut quotes = Vec::new();
+
+    for (spec_key, _quantity, price, _avg_cost, currency) in position_data {
+        if *price <= Decimal::ZERO {
+            continue;
+        }
+        let Some(asset_id) = spec_key_to_asset_id.get(spec_key) else {
+            continue;
+        };
+        if !seen.insert(asset_id.clone()) {
+            continue;
+        }
+
+        quotes.push(Quote {
+            id: format!("{}_{}_MANUAL", asset_id, date),
+            asset_id: asset_id.clone(),
+            timestamp,
+            open: *price,
+            high: *price,
+            low: *price,
+            close: *price,
+            adjclose: *price,
+            volume: Decimal::ZERO,
+            currency: currency.clone(),
+            data_source: DataSource::Manual,
+            created_at: now,
+            notes: Some("Broker-reported price".to_string()),
+        });
+    }
+
+    quotes
+}
 
 /// Service for syncing broker data to the local database
 pub struct BrokerSyncService {
@@ -52,6 +106,7 @@ pub struct BrokerSyncService {
     import_run_repository: Arc<dyn ImportRunRepositoryTrait>,
     snapshot_repository: Arc<dyn SnapshotRepositoryTrait>,
     snapshot_service: Option<Arc<dyn SnapshotServiceTrait>>,
+    quote_service: Option<Arc<dyn QuoteServiceTrait>>,
     event_sink: Arc<dyn DomainEventSink>,
 }
 
@@ -77,6 +132,7 @@ impl BrokerSyncService {
             import_run_repository,
             snapshot_repository,
             snapshot_service: None,
+            quote_service: None,
             event_sink: Arc::new(NoOpDomainEventSink),
         }
     }
@@ -93,6 +149,15 @@ impl BrokerSyncService {
     /// Sets the domain event sink for emitting events during broker sync.
     pub fn with_event_sink(mut self, event_sink: Arc<dyn DomainEventSink>) -> Self {
         self.event_sink = event_sink;
+        self
+    }
+
+    /// Sets the quote service used to persist broker-supplied prices.
+    ///
+    /// Without it, holdings are valued from the market data provider alone,
+    /// which cannot resolve bare foreign tickers such as `AKE` or `BRBY`.
+    pub fn with_quote_service(mut self, quote_service: Arc<dyn QuoteServiceTrait>) -> Self {
+        self.quote_service = Some(quote_service);
         self
     }
 }
@@ -799,7 +864,26 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
             }
         }
 
-        // 4. Build positions_map using resolved asset IDs
+        // 4. Persist the broker's own prices so valuation never depends on the
+        // market data provider resolving a bare foreign ticker.
+        if let Some(ref quote_service) = self.quote_service {
+            let quotes = build_broker_quotes(&position_data, &spec_key_to_asset_id, today, now);
+            if !quotes.is_empty() {
+                let count = quotes.len();
+                match quote_service.bulk_upsert_quotes(quotes).await {
+                    Ok(saved) => debug!(
+                        "Persisted {}/{} broker prices for account {}",
+                        saved, count, account_id
+                    ),
+                    Err(e) => warn!(
+                        "Failed to persist broker prices for account {}: {}",
+                        account_id, e
+                    ),
+                }
+            }
+        }
+
+        // 5. Build positions_map using resolved asset IDs
         let mut positions_map: HashMap<String, Position> = HashMap::new();
         let mut total_cost_basis = Decimal::ZERO;
 
@@ -1381,5 +1465,119 @@ mod tests {
         assert_eq!(diff.updated_positions, 1);
         assert_eq!(diff.removed_positions, 0);
         assert_eq!(diff.unchanged_positions, 0);
+    }
+
+    mod broker_quotes {
+        use super::super::build_broker_quotes;
+        use super::decimal;
+        use chrono::{NaiveDate, Utc};
+        use rust_decimal::Decimal;
+        use std::collections::HashMap;
+        use wealthfolio_core::quotes::DataSource;
+
+        fn day() -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 10, 8).unwrap()
+        }
+
+        fn keys(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        }
+
+        fn position(
+            spec_key: &str,
+            price: &str,
+            currency: &str,
+        ) -> (String, Decimal, Decimal, Decimal, String) {
+            (
+                spec_key.to_string(),
+                decimal("1"),
+                decimal(price),
+                decimal(price),
+                currency.to_string(),
+            )
+        }
+
+        /// A bare foreign ticker is exactly the case the market data provider
+        /// cannot resolve, so the broker price must survive the mapping.
+        #[test]
+        fn keeps_the_broker_price_for_a_foreign_listing() {
+            let quotes = build_broker_quotes(
+                &[position("AKE:EUR:EQUITY", "54.8736457824707", "EUR")],
+                &keys(&[("AKE:EUR:EQUITY", "asset-ake")]),
+                day(),
+                Utc::now(),
+            );
+
+            assert_eq!(quotes.len(), 1);
+            let quote = &quotes[0];
+            assert_eq!(quote.asset_id, "asset-ake");
+            assert_eq!(quote.id, "asset-ake_2026-10-08_MANUAL");
+            assert_eq!(quote.currency, "EUR");
+            assert_eq!(quote.close, decimal("54.8736457824707"));
+            assert_eq!(quote.open, quote.close);
+            assert_eq!(quote.adjclose, quote.close);
+            // MANUAL is what stops the provider sync from overwriting the day.
+            assert_eq!(quote.data_source, DataSource::Manual);
+            assert_eq!(quote.timestamp.to_rfc3339(), "2026-10-08T12:00:00+00:00");
+        }
+
+        /// Shorts report a negative market value but a positive price, so they
+        /// must still be quoted; a zero price means the broker had no mark.
+        #[test]
+        fn skips_positions_without_a_usable_price() {
+            let quotes = build_broker_quotes(
+                &[
+                    position("BRBY:GBP:EQUITY", "10.173452377319336", "GBP"),
+                    position("ZERO:EUR:EQUITY", "0", "EUR"),
+                    position("NEG:EUR:EQUITY", "-1.5", "EUR"),
+                ],
+                &keys(&[
+                    ("BRBY:GBP:EQUITY", "asset-brby"),
+                    ("ZERO:EUR:EQUITY", "asset-zero"),
+                    ("NEG:EUR:EQUITY", "asset-neg"),
+                ]),
+                day(),
+                Utc::now(),
+            );
+
+            assert_eq!(quotes.len(), 1);
+            assert_eq!(quotes[0].asset_id, "asset-brby");
+        }
+
+        /// Two spec keys can resolve to one asset; a duplicate id would make the
+        /// upsert fight itself over the same (asset_id, day) row.
+        #[test]
+        fn emits_one_quote_per_asset() {
+            let quotes = build_broker_quotes(
+                &[
+                    position("RACE:EUR:EQUITY", "345.15", "EUR"),
+                    position("RACE-DUP:EUR:EQUITY", "345.20", "EUR"),
+                ],
+                &keys(&[
+                    ("RACE:EUR:EQUITY", "asset-race"),
+                    ("RACE-DUP:EUR:EQUITY", "asset-race"),
+                ]),
+                day(),
+                Utc::now(),
+            );
+
+            assert_eq!(quotes.len(), 1);
+            assert_eq!(quotes[0].close, decimal("345.15"));
+        }
+
+        #[test]
+        fn ignores_positions_whose_asset_did_not_resolve() {
+            let quotes = build_broker_quotes(
+                &[position("GHOST:EUR:EQUITY", "12.5", "EUR")],
+                &keys(&[]),
+                day(),
+                Utc::now(),
+            );
+
+            assert!(quotes.is_empty());
+        }
     }
 }

@@ -163,3 +163,104 @@ async fn fetches_real_holdings_and_trades() {
         );
     }
 }
+
+/// Runs the broker-agnostic mapping layer over live IBKR payloads.
+///
+/// Every trade must survive `map_broker_activity`, and every position must
+/// carry the broker's own price. A regression in either place silently empties
+/// the activity list or values holdings at zero.
+#[tokio::test]
+#[ignore = "requires live IBKR credentials and network access"]
+async fn maps_every_live_trade_and_prices_every_position() {
+    use wealthfolio_connect::broker::mapping::map_broker_activity;
+
+    let client_id = std::env::var("IBKR_CLIENT_ID").expect("IBKR_CLIENT_ID");
+    let refresh_token = std::env::var("IBKR_REFRESH_TOKEN").expect("IBKR_REFRESH_TOKEN");
+
+    let store = Arc::new(EnvTokenStore {
+        token: Mutex::new(Some(refresh_token)),
+    });
+    let tokens = Arc::new(IbkrTokenManager::new(http_client(), client_id, store));
+    let client = IbkrMcpClient::new(http_client(), tokens);
+
+    let accounts = client.list_accounts(None).await.expect("list_accounts");
+    let account_id = accounts[0].id.clone().expect("account id");
+
+    let all = client
+        .get_account_activities(&account_id, None, None, Some(0), Some(100_000))
+        .await
+        .expect("all activities");
+
+    let mut mapped = 0usize;
+    let mut dropped: Vec<String> = Vec::new();
+    let mut needs_review = 0usize;
+    for activity in &all.data {
+        match map_broker_activity(activity, "test-account", Some("GBP"), Some("GBP")) {
+            Some(new_activity) => {
+                mapped += 1;
+                if new_activity.needs_review.unwrap_or(false) {
+                    needs_review += 1;
+                }
+            }
+            None => dropped.push(format!("{:?}", activity.id)),
+        }
+    }
+    println!(
+        "activities fetched={} mapped={} dropped={} needs_review={}",
+        all.data.len(),
+        mapped,
+        dropped.len(),
+        needs_review
+    );
+    assert!(
+        dropped.is_empty(),
+        "map_broker_activity dropped {} activities: {:?}",
+        dropped.len(),
+        &dropped[..dropped.len().min(10)]
+    );
+    assert_eq!(
+        needs_review, 0,
+        "live trades should map cleanly without review"
+    );
+
+    let holdings = client
+        .get_account_holdings(&account_id)
+        .await
+        .expect("holdings");
+    let positions = holdings.positions.unwrap_or_default();
+
+    let unpriced: Vec<String> = positions
+        .iter()
+        .filter(|p| p.price.unwrap_or(0.0) <= 0.0)
+        .map(|p| {
+            p.symbol
+                .as_ref()
+                .and_then(|s| s.symbol.as_ref())
+                .and_then(|s| s.symbol.clone())
+                .unwrap_or_else(|| "<unnamed>".to_string())
+        })
+        .collect();
+    println!(
+        "positions={} priced={}",
+        positions.len(),
+        positions.len() - unpriced.len()
+    );
+    assert!(
+        unpriced.is_empty(),
+        "IBKR positions missing a broker price: {unpriced:?}"
+    );
+
+    // Non-USD listings are the ones the market-data provider cannot resolve
+    // from a bare ticker, so they are exactly the ones that need these prices.
+    let foreign = positions
+        .iter()
+        .filter(|p| {
+            p.currency
+                .as_ref()
+                .and_then(|c| c.code.as_deref())
+                .is_some_and(|c| c != "USD")
+        })
+        .count();
+    println!("non-USD positions carrying a price={foreign}");
+    assert!(foreign > 0, "expected non-USD listings in this account");
+}
