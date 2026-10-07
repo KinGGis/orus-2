@@ -12,8 +12,8 @@ pub mod oauth;
 
 pub use allocation::{fetch_allocations, map_allocations, AllocationResponse};
 pub use client::{
-    IbkrMcpClient, IbkrNavHistory, IbkrPriceBar, IBKR_ACCOUNT_ID, IBKR_CONNECTION_ID,
-    IBKR_SOURCE_SYSTEM,
+    security_type_for, IbkrMcpClient, IbkrNavHistory, IbkrPriceBar, IBKR_ACCOUNT_ID,
+    IBKR_CONNECTION_ID, IBKR_SOURCE_SYSTEM,
 };
 pub use mcp::McpClient;
 pub use oauth::{
