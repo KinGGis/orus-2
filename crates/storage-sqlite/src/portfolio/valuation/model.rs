@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use wealthfolio_core::constants::DECIMAL_PRECISION;
-use wealthfolio_core::portfolio::valuation::DailyAccountValuation;
+use wealthfolio_core::portfolio::valuation::{DailyAccountValuation, ValuationSource};
 
 /// Database model for daily account valuations
 #[derive(
@@ -28,6 +28,7 @@ pub struct DailyAccountValuationDB {
     pub cost_basis: String,
     pub net_contribution: String,
     pub calculated_at: String,
+    pub source: String,
 }
 
 impl From<DailyAccountValuation> for DailyAccountValuationDB {
@@ -51,6 +52,7 @@ impl From<DailyAccountValuation> for DailyAccountValuationDB {
                 .round_dp(DECIMAL_PRECISION)
                 .to_string(),
             calculated_at: value.calculated_at.to_rfc3339(),
+            source: value.source.as_str().to_string(),
         }
     }
 }
@@ -73,6 +75,7 @@ impl From<DailyAccountValuationDB> for DailyAccountValuation {
             calculated_at: DateTime::parse_from_rfc3339(&value.calculated_at)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now()),
+            source: ValuationSource::from(value.source.as_str()),
         }
     }
 }

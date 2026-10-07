@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::system_accounts::{account_id_to_domain, parse_account_id};
 use wealthfolio_core::constants::DECIMAL_PRECISION;
 use wealthfolio_core::errors::ValidationError;
-use wealthfolio_core::portfolio::valuation::DailyAccountValuation;
+use wealthfolio_core::portfolio::valuation::{DailyAccountValuation, ValuationSource};
 use wealthfolio_core::{Error, Result};
 
 #[derive(Queryable, Identifiable, Selectable, Insertable, AsChangeset, Debug, Clone)]
@@ -27,6 +27,7 @@ pub struct DailyAccountValuationDB {
     pub cost_basis: BigDecimal,
     pub net_contribution: BigDecimal,
     pub calculated_at: DateTime<Utc>,
+    pub source: String,
 }
 
 fn decimal_from_bigdecimal(value: &BigDecimal) -> Decimal {
@@ -53,6 +54,7 @@ impl From<DailyAccountValuationDB> for DailyAccountValuation {
             cost_basis: decimal_from_bigdecimal(&value.cost_basis),
             net_contribution: decimal_from_bigdecimal(&value.net_contribution),
             calculated_at: value.calculated_at,
+            source: ValuationSource::from(value.source.as_str()),
         }
     }
 }
@@ -90,6 +92,7 @@ impl TryFrom<&DailyAccountValuation> for DailyAccountValuationDB {
             cost_basis: bigdecimal_from_decimal(value.cost_basis),
             net_contribution: bigdecimal_from_decimal(value.net_contribution),
             calculated_at: value.calculated_at,
+            source: value.source.as_str().to_string(),
         })
     }
 }

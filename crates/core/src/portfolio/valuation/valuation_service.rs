@@ -3,12 +3,13 @@ use crate::fx::currency::normalize_currency_code;
 use crate::fx::FxServiceTrait;
 use crate::portfolio::snapshot::SnapshotServiceTrait;
 use crate::portfolio::valuation::valuation_calculator::calculate_valuation;
-use crate::portfolio::valuation::valuation_model::DailyAccountValuation;
+use crate::portfolio::valuation::valuation_model::{DailyAccountValuation, ValuationSource};
 use crate::portfolio::valuation::ValuationRepositoryTrait;
-use crate::quotes::QuoteServiceTrait;
+use crate::quotes::{DataSource, QuoteServiceTrait};
 use crate::utils::time_utils;
 use async_trait::async_trait;
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use log::{debug, error, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -297,12 +298,19 @@ impl ValuationServiceTrait for ValuationService {
             )
             .await?;
 
-        // Build quotes_by_date and track which assets have ANY quotes at all
+        // Build quotes_by_date and track which assets have ANY quotes at all.
+        //
+        // Only provider quotes count towards `assets_with_quotes`. A broker or
+        // manually marked price covers a single day by design, so counting it
+        // here would make every other day look like a provider data gap and
+        // silently drop the whole day from the valuation history below.
         let mut assets_with_quotes: HashSet<String> = HashSet::new();
         let quotes_by_date = {
             let mut map = HashMap::new();
             for quote in quotes_vec {
-                assets_with_quotes.insert(quote.asset_id.clone());
+                if quote.data_source != DataSource::Manual {
+                    assets_with_quotes.insert(quote.asset_id.clone());
+                }
                 map.entry(quote.timestamp.date_naive())
                     .or_insert_with(HashMap::new)
                     .insert(quote.asset_id.clone(), quote);
@@ -395,8 +403,33 @@ impl ValuationServiceTrait for ValuationService {
             .collect();
 
         if !newly_calculated_valuations.is_empty() {
+            // IBKR-style brokers report their own net asset value. Only the
+            // market value depends on quotes we may be missing, so the broker
+            // NAV replaces that figure while cash, cost basis and net
+            // contribution stay as computed from activities — those are
+            // derived from the transaction history and remain trustworthy.
+            let broker_navs: HashMap<NaiveDate, Decimal> = self
+                .valuation_repository
+                .get_historical_valuations(account_id, None, None)?
+                .into_iter()
+                .filter(|v| v.source == ValuationSource::BrokerImported)
+                .map(|v| (v.valuation_date, v.total_value))
+                .collect();
+
+            let valuations_to_save: Vec<DailyAccountValuation> = newly_calculated_valuations
+                .into_iter()
+                .map(|mut valuation| {
+                    if let Some(nav) = broker_navs.get(&valuation.valuation_date) {
+                        valuation.investment_market_value = *nav - valuation.cash_balance;
+                        valuation.total_value = *nav;
+                        valuation.source = ValuationSource::BrokerImported;
+                    }
+                    valuation
+                })
+                .collect();
+
             self.valuation_repository
-                .save_valuations(&newly_calculated_valuations)
+                .save_valuations(&valuations_to_save)
                 .await?;
         }
 

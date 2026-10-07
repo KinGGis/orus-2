@@ -388,7 +388,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
                 snapshot_repository.clone(),
             )
             .with_event_sink(domain_event_sink.clone())
-            .with_snapshot_service(snapshot_service.clone()),
+            .with_snapshot_service(snapshot_service.clone())
+            .with_quote_service(quote_service.clone()),
         );
         let health_service: Arc<dyn HealthServiceTrait + Send + Sync> = Arc::new(
             HealthService::new(health_dismissal_repository),
@@ -762,7 +763,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             snapshot_repository.clone(),
         )
         .with_event_sink(domain_event_sink.clone())
-        .with_snapshot_service(snapshot_service.clone()),
+        .with_snapshot_service(snapshot_service.clone())
+        .with_quote_service(quote_service.clone()),
     );
 
     // Determine data root directory (parent of DB path)

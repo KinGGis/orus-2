@@ -6,6 +6,36 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
+/// Source of a daily valuation - how the figures were obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValuationSource {
+    /// Derived from snapshots and market quotes.
+    #[default]
+    Calculated,
+    /// Reported directly by the broker, which is authoritative over any
+    /// locally computed figure for the same account and day.
+    BrokerImported,
+}
+
+impl ValuationSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ValuationSource::Calculated => "CALCULATED",
+            ValuationSource::BrokerImported => "BROKER_IMPORTED",
+        }
+    }
+}
+
+impl From<&str> for ValuationSource {
+    fn from(value: &str) -> Self {
+        match value {
+            "BROKER_IMPORTED" => ValuationSource::BrokerImported,
+            _ => ValuationSource::Calculated,
+        }
+    }
+}
+
 /// Domain model for daily account valuation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +52,8 @@ pub struct DailyAccountValuation {
     pub cost_basis: Decimal,
     pub net_contribution: Decimal,
     pub calculated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub source: ValuationSource,
 }
 
 impl DailyAccountValuation {

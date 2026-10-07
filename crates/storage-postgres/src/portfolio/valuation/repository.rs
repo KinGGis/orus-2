@@ -13,7 +13,9 @@ use crate::portfolio::valuation::model::DailyAccountValuationDB;
 use crate::schema::wf_daily_account_valuation::dsl as valuations_dsl;
 use crate::system_accounts::parse_account_id;
 use wealthfolio_core::errors::Result;
-use wealthfolio_core::portfolio::valuation::{DailyAccountValuation, ValuationRepositoryTrait};
+use wealthfolio_core::portfolio::valuation::{
+    DailyAccountValuation, ValuationRepositoryTrait, ValuationSource,
+};
 
 pub struct ValuationRepository {
     pool: Arc<DbPool>,
@@ -75,6 +77,7 @@ impl ValuationRepositoryTrait for ValuationRepository {
                     valuations_dsl::cost_basis.eq(excluded(valuations_dsl::cost_basis)),
                     valuations_dsl::net_contribution.eq(excluded(valuations_dsl::net_contribution)),
                     valuations_dsl::calculated_at.eq(excluded(valuations_dsl::calculated_at)),
+                    valuations_dsl::source.eq(excluded(valuations_dsl::source)),
                 ))
                 .execute(&mut conn)
                 .map_err(StorageError::from)?;
@@ -134,7 +137,11 @@ impl ValuationRepositoryTrait for ValuationRepository {
         let mut conn = get_connection(&self.pool)?;
 
         let query = valuations_dsl::wf_daily_account_valuation
-            .filter(valuations_dsl::account_id.eq(parsed_account_id));
+            .filter(valuations_dsl::account_id.eq(parsed_account_id))
+            // Broker-reported rows survive recalculations: they are not
+            // reproducible from local quotes, so dropping them would lose the
+            // custodian's own figures for good.
+            .filter(valuations_dsl::source.eq(ValuationSource::Calculated.as_str()));
 
         match since_date {
             None => {

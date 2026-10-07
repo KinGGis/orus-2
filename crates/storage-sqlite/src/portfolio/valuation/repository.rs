@@ -14,6 +14,7 @@ use crate::db::{get_connection, WriteHandle};
 use crate::errors::StorageError;
 use crate::schema::daily_account_valuation;
 use crate::schema::daily_account_valuation::dsl::*;
+use wealthfolio_core::portfolio::valuation::ValuationSource;
 use wealthfolio_core::errors::Result;
 use wealthfolio_core::portfolio::valuation::{DailyAccountValuation, ValuationRepositoryTrait};
 
@@ -119,10 +120,15 @@ impl ValuationRepositoryTrait for ValuationRepository {
         let account_id_owned = input_account_id.to_string();
         self.writer
             .exec(move |conn| {
+                // Broker-reported rows survive recalculations: they are not
+                // reproducible from local quotes, so dropping them would lose
+                // the custodian's own figures for good.
                 match since_date {
                     None => {
                         diesel::delete(
-                            daily_account_valuation::table.filter(account_id.eq(account_id_owned)),
+                            daily_account_valuation::table
+                                .filter(account_id.eq(account_id_owned))
+                                .filter(source.eq(ValuationSource::Calculated.as_str())),
                         )
                         .execute(conn)
                         .map_err(StorageError::from)?;
@@ -132,6 +138,7 @@ impl ValuationRepositoryTrait for ValuationRepository {
                         diesel::delete(
                             daily_account_valuation::table
                                 .filter(account_id.eq(account_id_owned))
+                                .filter(source.eq(ValuationSource::Calculated.as_str()))
                                 .filter(valuation_date.ge(date_str)),
                         )
                         .execute(conn)

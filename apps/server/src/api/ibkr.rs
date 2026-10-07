@@ -13,7 +13,9 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use chrono::Utc;
+use rust_decimal::Decimal;
+use tracing::{error, info, warn};
 
 use wealthfolio_connect::broker::{SyncConfig, SyncOrchestrator, SyncResult};
 use wealthfolio_connect::ibkr::{
@@ -21,10 +23,16 @@ use wealthfolio_connect::ibkr::{
     IbkrTokenManager, IbkrTokenStore, IBKR_ACCOUNT_ID,
 };
 use wealthfolio_core::errors::{Error as CoreError, Result as CoreResult};
+use wealthfolio_core::portfolio::valuation::{
+    DailyAccountValuation, ValuationRecalcMode, ValuationSource,
+};
+use wealthfolio_core::portfolio::snapshot::SnapshotRecalcMode;
+use wealthfolio_core::quotes::MarketSyncMode;
 use wealthfolio_core::secrets::SecretStore;
 
 use crate::{
     api::connect::EventBusProgressReporter,
+    api::shared::{enqueue_portfolio_job, PortfolioJobConfig},
     error::{ApiError, ApiResult},
     main_lib::AppState,
 };
@@ -399,7 +407,98 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
     }
 
     info!("[IBKR] Sync completed: {}", result.message);
+
+    // The MCP publishes IBKR's own daily net asset value. It is the figure the
+    // broker itself reports, so it replaces the locally computed market value
+    // whenever we have it — that is what repairs the days where a European
+    // listing has no quote in our market data. A failure here must not fail the
+    // sync: positions and activities are already imported at this point.
+    if let Err(err) = import_nav_history(&state, &client).await {
+        warn!("[IBKR] NAV history import skipped: {}", err);
+    }
+
     Ok(Json(result))
+}
+
+/// Persist IBKR's reported daily NAV as broker valuations, then ask for a
+/// recalculation so the valuation service can fold them into the series.
+async fn import_nav_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> CoreResult<usize> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+
+    let accounts = state.account_service.get_all_accounts()?;
+    let Some(account) = accounts
+        .into_iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
+    else {
+        return Ok(0);
+    };
+
+    let history = client.nav_history().await?;
+    if history.points.is_empty() {
+        return Ok(0);
+    }
+
+    let base_currency = state.base_currency.read().unwrap().clone();
+    let currency = history
+        .currency
+        .clone()
+        .unwrap_or_else(|| account.currency.clone());
+    let now = Utc::now();
+
+    let valuations: Vec<DailyAccountValuation> = history
+        .points
+        .iter()
+        .map(|(date, nav)| {
+            let fx_rate_to_base = if currency == base_currency {
+                Decimal::ONE
+            } else {
+                state
+                    .fx_service
+                    .get_exchange_rate_for_date(&currency, &base_currency, *date)
+                    .unwrap_or(Decimal::ONE)
+            };
+
+            DailyAccountValuation {
+                id: format!("{}_{}", account.id, date),
+                account_id: account.id.clone(),
+                valuation_date: *date,
+                account_currency: currency.clone(),
+                base_currency: base_currency.clone(),
+                fx_rate_to_base,
+                cash_balance: Decimal::ZERO,
+                investment_market_value: *nav,
+                total_value: *nav,
+                cost_basis: Decimal::ZERO,
+                net_contribution: Decimal::ZERO,
+                calculated_at: now,
+                source: ValuationSource::BrokerImported,
+            }
+        })
+        .collect();
+
+    let imported = valuations.len();
+    state.valuation_repository.save_valuations(&valuations).await?;
+
+    info!(
+        "[IBKR] Imported {} broker NAV points ({} .. {})",
+        imported,
+        history.points.first().map(|(d, _)| *d).unwrap(),
+        history.points.last().map(|(d, _)| *d).unwrap()
+    );
+
+    // Recalculate now that the NAV rows exist: the valuation service merges
+    // them into the computed series instead of leaving them as bare NAV.
+    enqueue_portfolio_job(
+        state.clone(),
+        PortfolioJobConfig {
+            account_ids: Some(vec![account.id.clone()]),
+            market_sync_mode: MarketSyncMode::None,
+            snapshot_mode: SnapshotRecalcMode::Full,
+            valuation_mode: ValuationRecalcMode::Full,
+        },
+    );
+
+    Ok(imported)
 }
 
 /// Read-only probe that reports what IBKR currently holds, without writing to
@@ -408,11 +507,15 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
 #[serde(rename_all = "camelCase")]
 struct DiagnosticResponse {
     positions: usize,
+    positions_priced: usize,
+    unpriced_symbols: Vec<String>,
     cash_balances: usize,
     activities: usize,
+    activities_mapped: usize,
 }
 
 async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<DiagnosticResponse>> {
+    use wealthfolio_connect::broker::mapping::map_broker_activity;
     use wealthfolio_connect::broker::BrokerApiClient;
 
     let client = create_ibkr_client(&state)?;
@@ -422,18 +525,36 @@ async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<Diagno
         .await
         .map_err(to_api_error)?;
     let activities = client
-        .get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(1))
+        .get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(100_000))
         .await
         .map_err(to_api_error)?;
 
+    let positions = holdings.positions.unwrap_or_default();
+    let unpriced_symbols: Vec<String> = positions
+        .iter()
+        .filter(|p| p.price.unwrap_or(0.0) <= 0.0)
+        .map(|p| {
+            p.symbol
+                .as_ref()
+                .and_then(|s| s.symbol.as_ref())
+                .and_then(|s| s.symbol.clone())
+                .unwrap_or_else(|| "<unnamed>".to_string())
+        })
+        .collect();
+
+    let activities_mapped = activities
+        .data
+        .iter()
+        .filter(|a| map_broker_activity(a, IBKR_ACCOUNT_ID, None, None).is_some())
+        .count();
+
     Ok(Json(DiagnosticResponse {
-        positions: holdings.positions.map(|p| p.len()).unwrap_or(0),
+        positions: positions.len(),
+        positions_priced: positions.len() - unpriced_symbols.len(),
+        unpriced_symbols,
         cash_balances: holdings.balances.map(|b| b.len()).unwrap_or(0),
-        activities: activities
-            .pagination
-            .and_then(|p| p.total)
-            .unwrap_or(0)
-            .max(0) as usize,
+        activities: activities.data.len(),
+        activities_mapped,
     }))
 }
 
