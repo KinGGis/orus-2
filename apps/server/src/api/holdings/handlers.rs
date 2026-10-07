@@ -137,6 +137,13 @@ pub async fn get_portfolio_allocations(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HoldingsQuery>,
 ) -> ApiResult<Json<PortfolioAllocations>> {
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    if let Some(allocations) =
+        crate::api::ibkr::allocations_override(&state, &q.account_id).await
+    {
+        return Ok(Json(allocations));
+    }
+
     let base = state.base_currency.read().unwrap().clone();
     let allocations = state
         .allocation_service
