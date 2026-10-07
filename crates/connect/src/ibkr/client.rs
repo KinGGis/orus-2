@@ -12,6 +12,7 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use wealthfolio_core::assets::InstrumentType;
 use wealthfolio_core::errors::{Error, Result};
 
 use super::mcp::McpClient;
@@ -97,6 +98,26 @@ pub struct IbkrPriceBar {
     pub low: Decimal,
     pub close: Decimal,
     pub volume: Decimal,
+}
+
+/// Maps our instrument classification onto IBKR's contract taxonomy.
+///
+/// `InstrumentType` exists to route an asset to the right provider endpoint, so
+/// it is the natural source for the `security_type` every contract call needs.
+///
+/// Equity deliberately covers ETFs and funds as well as shares: IBKR has no
+/// `ETF` security type and quotes them as `STK`, so asking for anything else
+/// would cost those positions their history. An unclassified asset falls back
+/// to `STK` for the same reason — it is what nearly every broker position is.
+pub fn security_type_for(instrument_type: Option<&InstrumentType>) -> &'static str {
+    match instrument_type {
+        Some(InstrumentType::Option) => "OPT",
+        Some(InstrumentType::Bond) => "BOND",
+        Some(InstrumentType::Crypto) => "CRYPTO",
+        Some(InstrumentType::Metal) => "CMDTY",
+        Some(InstrumentType::Fx) => "CASH",
+        Some(InstrumentType::Equity) | None => "STK",
+    }
 }
 
 /// Reads one timestamp of a price history.
@@ -883,5 +904,22 @@ mod tests {
             ..Default::default()
         };
         assert!(price_bars(&history).is_empty());
+    }
+
+    /// ETFs and funds are `Equity` on our side but `STK` at IBKR, and an asset
+    /// we never classified must not be treated as exotic.
+    #[test]
+    fn equity_and_unclassified_assets_are_stocks() {
+        assert_eq!(security_type_for(Some(&InstrumentType::Equity)), "STK");
+        assert_eq!(security_type_for(None), "STK");
+    }
+
+    #[test]
+    fn other_instruments_use_their_own_contract_type() {
+        assert_eq!(security_type_for(Some(&InstrumentType::Option)), "OPT");
+        assert_eq!(security_type_for(Some(&InstrumentType::Bond)), "BOND");
+        assert_eq!(security_type_for(Some(&InstrumentType::Crypto)), "CRYPTO");
+        assert_eq!(security_type_for(Some(&InstrumentType::Metal)), "CMDTY");
+        assert_eq!(security_type_for(Some(&InstrumentType::Fx)), "CASH");
     }
 }

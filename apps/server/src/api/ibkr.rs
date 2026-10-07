@@ -20,9 +20,10 @@ use tracing::{error, info, warn};
 
 use wealthfolio_connect::broker::{SyncConfig, SyncOrchestrator, SyncResult};
 use wealthfolio_connect::ibkr::{
-    build_authorize_url, generate_pkce, generate_state, http_client, register_client, IbkrMcpClient,
-    IbkrTokenManager, IbkrTokenStore, IBKR_ACCOUNT_ID,
+    build_authorize_url, generate_pkce, generate_state, http_client, register_client,
+    security_type_for, IbkrMcpClient, IbkrTokenManager, IbkrTokenStore, IBKR_ACCOUNT_ID,
 };
+use wealthfolio_core::assets::InstrumentType;
 use wealthfolio_core::errors::{Error as CoreError, Result as CoreResult};
 use wealthfolio_core::portfolio::valuation::{
     DailyAccountValuation, ValuationRecalcMode, ValuationSource,
@@ -456,13 +457,14 @@ async fn import_price_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> 
         return Ok(0);
     }
 
-    let assets_by_symbol: HashMap<String, String> = state
+    let assets_by_symbol: HashMap<String, (String, Option<InstrumentType>)> = state
         .asset_service
         .get_assets()?
         .into_iter()
         .filter_map(|asset| {
+            let instrument_type = asset.instrument_type.clone();
             let symbol = asset.instrument_symbol.or(asset.display_code)?;
-            Some((symbol.to_uppercase(), asset.id))
+            Some((symbol.to_uppercase(), (asset.id, instrument_type)))
         })
         .collect();
 
@@ -489,7 +491,7 @@ async fn import_price_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> 
             continue;
         };
 
-        let Some(asset_id) = assets_by_symbol.get(&symbol.to_uppercase()) else {
+        let Some((asset_id, instrument_type)) = assets_by_symbol.get(&symbol.to_uppercase()) else {
             warn!("[IBKR] No local asset matches {symbol}, skipping its price history");
             continue;
         };
@@ -500,13 +502,14 @@ async fn import_price_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> 
             .and_then(|c| c.code.clone())
             .unwrap_or_default();
 
+        let security_type = security_type_for(instrument_type.as_ref());
         let bars = match client
-            .price_history(contract_id, "STK", PRICE_HISTORY_PERIOD)
+            .price_history(contract_id, security_type, PRICE_HISTORY_PERIOD)
             .await
         {
             Ok(bars) => bars,
             Err(err) => {
-                warn!("[IBKR] Price history unavailable for {symbol}: {err}");
+                warn!("[IBKR] Price history unavailable for {symbol} ({security_type}): {err}");
                 continue;
             }
         };
@@ -698,3 +701,4 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/dfc/ibkr/sync", post(sync_ibkr))
         .route("/dfc/ibkr/diagnostic", get(diagnostic))
 }
+
