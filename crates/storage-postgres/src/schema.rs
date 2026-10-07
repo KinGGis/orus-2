@@ -222,7 +222,7 @@ diesel::table! {
 
 diesel::table! {
     wf_taxonomies (id) {
-        id -> Uuid,
+        id -> Text,
         name -> Text,
         color -> Text,
         description -> Nullable<Text>,
@@ -236,9 +236,9 @@ diesel::table! {
 
 diesel::table! {
     wf_taxonomy_categories (id, taxonomy_id) {
-        id -> Uuid,
-        taxonomy_id -> Uuid,
-        parent_id -> Nullable<Uuid>,
+        id -> Text,
+        taxonomy_id -> Text,
+        parent_id -> Nullable<Text>,
         name -> Text,
         key -> Text,
         color -> Text,
@@ -253,8 +253,8 @@ diesel::table! {
     wf_asset_taxonomy_assignments (id) {
         id -> Uuid,
         asset_id -> Uuid,
-        taxonomy_id -> Uuid,
-        category_id -> Uuid,
+        taxonomy_id -> Text,
+        category_id -> Text,
         weight -> Int4,
         source -> Text,
         created_at -> Timestamptz,

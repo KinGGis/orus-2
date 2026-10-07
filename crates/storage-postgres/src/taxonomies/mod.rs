@@ -18,7 +18,7 @@ use wealthfolio_core::Result;
 #[diesel(table_name = wf_taxonomies)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 struct TaxonomyDB {
-    id: Uuid,
+    id: String,
     name: String,
     color: String,
     description: Option<String>,
@@ -34,9 +34,9 @@ struct TaxonomyDB {
 #[diesel(primary_key(id, taxonomy_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 struct CategoryDB {
-    id: Uuid,
-    taxonomy_id: Uuid,
-    parent_id: Option<Uuid>,
+    id: String,
+    taxonomy_id: String,
+    parent_id: Option<String>,
     name: String,
     key: String,
     color: String,
@@ -52,8 +52,8 @@ struct CategoryDB {
 struct AssetTaxonomyAssignmentDB {
     id: Uuid,
     asset_id: Uuid,
-    taxonomy_id: Uuid,
-    category_id: Uuid,
+    taxonomy_id: String,
+    category_id: String,
     weight: i32,
     source: String,
     created_at: DateTime<Utc>,
@@ -71,7 +71,7 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid> {
 impl From<TaxonomyDB> for Taxonomy {
     fn from(db: TaxonomyDB) -> Self {
         Self {
-            id: db.id.to_string(),
+            id: db.id,
             name: db.name,
             color: db.color,
             description: db.description,
@@ -87,9 +87,9 @@ impl From<TaxonomyDB> for Taxonomy {
 impl From<CategoryDB> for Category {
     fn from(db: CategoryDB) -> Self {
         Self {
-            id: db.id.to_string(),
-            taxonomy_id: db.taxonomy_id.to_string(),
-            parent_id: db.parent_id.map(|value| value.to_string()),
+            id: db.id,
+            taxonomy_id: db.taxonomy_id,
+            parent_id: db.parent_id,
             name: db.name,
             key: db.key,
             color: db.color,
@@ -106,8 +106,8 @@ impl From<AssetTaxonomyAssignmentDB> for AssetTaxonomyAssignment {
         Self {
             id: db.id.to_string(),
             asset_id: db.asset_id.to_string(),
-            taxonomy_id: db.taxonomy_id.to_string(),
-            category_id: db.category_id.to_string(),
+            taxonomy_id: db.taxonomy_id,
+            category_id: db.category_id,
             weight: db.weight,
             source: db.source,
             created_at: db.created_at.naive_utc(),
@@ -139,7 +139,7 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     fn get_taxonomy(&self, id: &str) -> Result<Option<Taxonomy>> {
-        let parsed_id = parse_uuid(id, "taxonomy_id")?;
+        let parsed_id = id.to_string();
         let mut conn = get_connection(&self.pool)?;
         let result = wf_taxonomies::table
             .find(parsed_id)
@@ -155,10 +155,7 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
         let db = TaxonomyDB {
             id: taxonomy
                 .id
-                .as_deref()
-                .map(|value| parse_uuid(value, "taxonomy_id"))
-                .transpose()?
-                .unwrap_or_else(Uuid::new_v4),
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
             name: taxonomy.name,
             color: taxonomy.color,
             description: taxonomy.description,
@@ -178,9 +175,9 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     async fn update_taxonomy(&self, taxonomy: Taxonomy) -> Result<Taxonomy> {
-        let parsed_id = parse_uuid(&taxonomy.id, "taxonomy_id")?;
+        let parsed_id = taxonomy.id.clone();
         let db = TaxonomyDB {
-            id: parsed_id,
+            id: parsed_id.clone(),
             name: taxonomy.name,
             color: taxonomy.color,
             description: taxonomy.description,
@@ -200,7 +197,7 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     async fn delete_taxonomy(&self, id: &str) -> Result<usize> {
-        let parsed_id = parse_uuid(id, "taxonomy_id")?;
+        let parsed_id = id.to_string();
         let mut conn = get_connection(&self.pool)?;
         diesel::delete(wf_taxonomies::table.find(parsed_id))
             .execute(&mut conn)
@@ -209,7 +206,7 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     fn get_categories(&self, taxonomy_id: &str) -> Result<Vec<Category>> {
-        let parsed_taxonomy_id = parse_uuid(taxonomy_id, "taxonomy_id")?;
+        let parsed_taxonomy_id = taxonomy_id.to_string();
         let mut conn = get_connection(&self.pool)?;
         let results = wf_taxonomy_categories::table
             .filter(wf_taxonomy_categories::taxonomy_id.eq(parsed_taxonomy_id))
@@ -221,8 +218,8 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     fn get_category(&self, taxonomy_id: &str, category_id: &str) -> Result<Option<Category>> {
-        let parsed_taxonomy_id = parse_uuid(taxonomy_id, "taxonomy_id")?;
-        let parsed_category_id = parse_uuid(category_id, "category_id")?;
+        let parsed_taxonomy_id = taxonomy_id.to_string();
+        let parsed_category_id = category_id.to_string();
         let mut conn = get_connection(&self.pool)?;
         let result = wf_taxonomy_categories::table
             .filter(wf_taxonomy_categories::taxonomy_id.eq(parsed_taxonomy_id))
@@ -239,16 +236,9 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
         let db = CategoryDB {
             id: category
                 .id
-                .as_deref()
-                .map(|value| parse_uuid(value, "category_id"))
-                .transpose()?
-                .unwrap_or_else(Uuid::new_v4),
-            taxonomy_id: parse_uuid(&category.taxonomy_id, "taxonomy_id")?,
-            parent_id: category
-                .parent_id
-                .as_deref()
-                .map(|value| parse_uuid(value, "parent_id"))
-                .transpose()?,
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            taxonomy_id: category.taxonomy_id,
+            parent_id: category.parent_id,
             name: category.name,
             key: category.key,
             color: category.color,
@@ -267,16 +257,12 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     async fn update_category(&self, category: Category) -> Result<Category> {
-        let parsed_taxonomy_id = parse_uuid(&category.taxonomy_id, "taxonomy_id")?;
-        let parsed_category_id = parse_uuid(&category.id, "category_id")?;
+        let parsed_taxonomy_id = category.taxonomy_id.clone();
+        let parsed_category_id = category.id.clone();
         let db = CategoryDB {
-            id: parsed_category_id,
-            taxonomy_id: parsed_taxonomy_id,
-            parent_id: category
-                .parent_id
-                .as_deref()
-                .map(|value| parse_uuid(value, "parent_id"))
-                .transpose()?,
+            id: parsed_category_id.clone(),
+            taxonomy_id: parsed_taxonomy_id.clone(),
+            parent_id: category.parent_id,
             name: category.name,
             key: category.key,
             color: category.color,
@@ -299,8 +285,8 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
     }
 
     async fn delete_category(&self, taxonomy_id: &str, category_id: &str) -> Result<usize> {
-        let parsed_taxonomy_id = parse_uuid(taxonomy_id, "taxonomy_id")?;
-        let parsed_category_id = parse_uuid(category_id, "category_id")?;
+        let parsed_taxonomy_id = taxonomy_id.to_string();
+        let parsed_category_id = category_id.to_string();
         let mut conn = get_connection(&self.pool)?;
         diesel::delete(
             wf_taxonomy_categories::table
@@ -337,8 +323,8 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
         taxonomy_id: &str,
         category_id: &str,
     ) -> Result<Vec<AssetTaxonomyAssignment>> {
-        let parsed_taxonomy_id = parse_uuid(taxonomy_id, "taxonomy_id")?;
-        let parsed_category_id = parse_uuid(category_id, "category_id")?;
+        let parsed_taxonomy_id = taxonomy_id.to_string();
+        let parsed_category_id = category_id.to_string();
         let mut conn = get_connection(&self.pool)?;
         let results = wf_asset_taxonomy_assignments::table
             .filter(wf_asset_taxonomy_assignments::taxonomy_id.eq(parsed_taxonomy_id))
@@ -362,8 +348,8 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
                 .transpose()?
                 .unwrap_or_else(Uuid::new_v4),
             asset_id: parse_uuid(&assignment.asset_id, "asset_id")?,
-            taxonomy_id: parse_uuid(&assignment.taxonomy_id, "taxonomy_id")?,
-            category_id: parse_uuid(&assignment.category_id, "category_id")?,
+            taxonomy_id: assignment.taxonomy_id,
+            category_id: assignment.category_id,
             weight: assignment.weight,
             source: assignment.source,
             created_at: now,
@@ -400,7 +386,7 @@ impl TaxonomyRepositoryTrait for TaxonomyRepository {
 
     async fn delete_asset_assignments(&self, asset_id: &str, taxonomy_id: &str) -> Result<usize> {
         let parsed_asset_id = parse_uuid(asset_id, "asset_id")?;
-        let parsed_taxonomy_id = parse_uuid(taxonomy_id, "taxonomy_id")?;
+        let parsed_taxonomy_id = taxonomy_id.to_string();
         let mut conn = get_connection(&self.pool)?;
         diesel::delete(
             wf_asset_taxonomy_assignments::table
