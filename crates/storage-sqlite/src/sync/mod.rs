@@ -1,6 +1,7 @@
 //! SQLite storage implementation for sync (platforms, app sync state, import runs).
 
 pub mod app_sync;
+pub mod broker_snapshot;
 pub mod import_run;
 pub mod platform;
 pub mod state;
@@ -13,6 +14,7 @@ use wealthfolio_core::Result;
 
 /// Broker ingest aliases. `import_run` includes both broker ingest and manual CSV imports.
 pub mod broker_ingest {
+    pub use super::broker_snapshot::BrokerSnapshotRepository;
     pub use super::import_run::{ImportRunDB, ImportRunRepository};
     pub use super::platform::{Platform, PlatformDB, PlatformRepository};
     pub use super::state::{
@@ -27,6 +29,7 @@ pub use app_sync::{
     insert_outbox_event, AppSyncRepository, OutboxWriteRequest, SqliteSyncEngineDbPorts,
     SyncLocalDataSummary, SyncTableRowCount,
 };
+pub use broker_snapshot::BrokerSnapshotRepository;
 pub use import_run::{ImportRunDB, ImportRunRepository};
 pub use platform::{Platform, PlatformDB, PlatformRepository};
 pub use state::{

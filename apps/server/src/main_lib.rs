@@ -17,8 +17,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use wealthfolio_ai::ChatRepositoryTrait;
 use wealthfolio_ai::{AiProviderService, AiProviderServiceTrait, ChatConfig, ChatService};
 use wealthfolio_connect::{
-    BrokerSyncService, BrokerSyncServiceTrait, CoreImportRunRepositoryAdapter,
-    ImportRunRepositoryTrait, TokenLifecycleState,
+    BrokerSnapshotRepositoryTrait, BrokerSyncService, BrokerSyncServiceTrait,
+    CoreImportRunRepositoryAdapter, ImportRunRepositoryTrait, TokenLifecycleState,
 };
 use wealthfolio_core::addons::{AddonService, AddonServiceTrait};
 use wealthfolio_core::{
@@ -115,6 +115,8 @@ pub struct AppState {
     pub device_sync_runtime: Arc<DeviceSyncRuntimeState>,
     pub health_service: Arc<dyn HealthServiceTrait + Send + Sync>,
     pub token_lifecycle: Arc<TokenLifecycleState>,
+    /// Historised captures of what the broker reported, written at each sync.
+    pub broker_snapshot_repository: Arc<dyn BrokerSnapshotRepositoryTrait>,
     // DFC-specific repositories
     pub user_repository: Arc<dyn UserStore>,
     pub revolut_repository: Arc<dyn RevolutStore>,
@@ -236,6 +238,9 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         );
         let import_run_repository: Arc<dyn ImportRunRepositoryTrait> = Arc::new(
             wealthfolio_storage_postgres::sync::ImportRunRepository::new(pool.clone()),
+        );
+        let broker_snapshot_repository: Arc<dyn BrokerSnapshotRepositoryTrait> = Arc::new(
+            wealthfolio_storage_postgres::sync::BrokerSnapshotRepository::new(pool.clone()),
         );
         let broker_sync_state_repository = Arc::new(
             wealthfolio_storage_postgres::sync::BrokerSyncStateRepository::new(pool.clone()),
@@ -527,6 +532,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             device_sync_runtime,
             health_service,
             token_lifecycle,
+            broker_snapshot_repository,
             user_repository,
             revolut_repository,
             revolut_oauth_config,
@@ -714,6 +720,12 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     // Import run repository for tracking CSV imports
     let import_run_repository: Arc<dyn ImportRunRepositoryTrait> =
         Arc::new(ImportRunRepository::new(pool.clone(), writer.clone()));
+    let broker_snapshot_repository: Arc<dyn BrokerSnapshotRepositoryTrait> = Arc::new(
+        wealthfolio_storage_sqlite::sync::BrokerSnapshotRepository::new(
+            pool.clone(),
+            writer.clone(),
+        ),
+    );
     let core_import_run_repository = Arc::new(CoreImportRunRepositoryAdapter::new(
         import_run_repository.clone(),
     ));
@@ -911,6 +923,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         device_sync_runtime,
         health_service,
         token_lifecycle,
+        broker_snapshot_repository,
         user_repository,
         revolut_repository,
         revolut_oauth_config,

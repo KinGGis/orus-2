@@ -34,8 +34,9 @@ pub use token_lifecycle::{
 };
 
 pub use broker_ingest::{
+    BrokerSnapshotKind, BrokerSnapshotMetric, BrokerSnapshotRepositoryTrait, BrokerSnapshotSide,
     BrokerSyncState, BrokerSyncStateRepositoryTrait, CoreImportRunRepositoryAdapter, ImportRun,
     ImportRunMode, ImportRunRepositoryTrait, ImportRunStatus, ImportRunSummary, ImportRunType,
-    ReviewMode,
+    NewBrokerSnapshot, ReviewMode, StoredBrokerSnapshot,
 };
 pub use platform::Platform;

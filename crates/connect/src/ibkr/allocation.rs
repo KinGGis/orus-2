@@ -261,21 +261,29 @@ pub fn map_allocations(response: &AllocationResponse) -> PortfolioAllocations {
     }
 }
 
-/// Fetch every allocation dimension in a single call.
+/// Fetch every allocation dimension in a single call, unparsed.
+///
+/// The raw payload is kept so it can be both historised verbatim for audit and
+/// re-mapped later, rather than only surviving as our interpretation of it.
 ///
 /// `currency` is deliberately omitted: requesting any non-base currency makes
 /// IBKR silently answer with the prior trading day instead of live data.
-pub async fn fetch_allocations(mcp: &McpClient) -> Result<PortfolioAllocations> {
-    let payload = mcp
-        .call_tool("get_pa_allocation", json!({ "type": "ALL" }))
-        .await?;
-    let response: AllocationResponse = serde_json::from_value(payload).map_err(|err| {
+pub async fn fetch_allocation_payload(mcp: &McpClient) -> Result<serde_json::Value> {
+    mcp.call_tool("get_pa_allocation", json!({ "type": "ALL" }))
+        .await
+}
+
+pub fn parse_allocations(payload: serde_json::Value) -> Result<AllocationResponse> {
+    serde_json::from_value(payload).map_err(|err| {
         Error::Unexpected(format!(
             "IBKR returned an unexpected allocation payload: {err}"
         ))
-    })?;
+    })
+}
 
-    Ok(map_allocations(&response))
+pub async fn fetch_allocations(mcp: &McpClient) -> Result<PortfolioAllocations> {
+    let payload = fetch_allocation_payload(mcp).await?;
+    Ok(map_allocations(&parse_allocations(payload)?))
 }
 
 #[cfg(test)]
