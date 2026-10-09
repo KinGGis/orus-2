@@ -222,6 +222,33 @@ diesel::table! {
 }
 
 diesel::table! {
+    wf_broker_snapshots (id) {
+        id -> Uuid,
+        account_id -> Uuid,
+        provider -> Text,
+        kind -> Text,
+        as_of_date -> Date,
+        captured_at -> Timestamptz,
+        payload -> Jsonb,
+    }
+}
+
+diesel::table! {
+    wf_broker_snapshot_metrics (id) {
+        id -> Uuid,
+        snapshot_id -> Uuid,
+        account_id -> Uuid,
+        as_of_date -> Date,
+        dimension -> Text,
+        category_id -> Text,
+        category_name -> Nullable<Text>,
+        side -> Text,
+        value -> Nullable<Numeric>,
+        weight -> Nullable<Numeric>,
+    }
+}
+
+diesel::table! {
     wf_taxonomies (id) {
         id -> Text,
         name -> Text,
@@ -548,6 +575,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     wf_app_settings,
     wf_asset_taxonomy_assignments,
     wf_assets,
+    wf_broker_snapshot_metrics,
+    wf_broker_snapshots,
     wf_brokers_sync_state,
     wf_contribution_limits,
     wf_daily_account_valuation,

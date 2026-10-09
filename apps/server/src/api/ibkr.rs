@@ -19,9 +19,12 @@ use rust_decimal::Decimal;
 use tracing::{error, info, warn};
 
 use wealthfolio_connect::broker::{SyncConfig, SyncOrchestrator, SyncResult};
+use wealthfolio_connect::broker_ingest::BrokerSnapshotKind;
 use wealthfolio_connect::ibkr::{
-    build_authorize_url, generate_pkce, generate_state, http_client, register_client,
-    security_type_for, IbkrMcpClient, IbkrTokenManager, IbkrTokenStore, IBKR_ACCOUNT_ID,
+    account_summary_snapshot, allocation_snapshot, build_authorize_url, generate_pkce,
+    generate_state, http_client, map_allocations, parse_allocations, performance_snapshot,
+    register_client, security_type_for, IbkrMcpClient, IbkrTokenManager, IbkrTokenStore,
+    IBKR_ACCOUNT_ID,
 };
 use wealthfolio_core::assets::InstrumentType;
 use wealthfolio_core::errors::{Error as CoreError, Result as CoreResult};
@@ -107,19 +110,21 @@ fn create_ibkr_client(state: &AppState) -> ApiResult<IbkrMcpClient> {
 /// stop reconciling. IBKR already classifies everything it custodies, so for
 /// the IBKR account we serve their breakdown directly.
 ///
-/// Returns `None` rather than an error on failure: a broker outage should leave
-/// the cards falling back to local data, not blank the page.
+/// The breakdown is read from the last sync's capture rather than from the
+/// broker. Rendering a page used to require a live OAuth round-trip to IBKR —
+/// the only read path in the product that did — which made the Insights page as
+/// slow and as fragile as the broker happened to be. Serving the stored capture
+/// also means the cards show the figures the sync recorded, matching the rest
+/// of the data on screen.
+///
+/// Returns `None` rather than an error on failure: nothing captured yet should
+/// leave the cards falling back to local data, not blank the page.
 pub(crate) async fn allocations_override(
     state: &AppState,
     account_id: &str,
 ) -> Option<wealthfolio_core::portfolio::allocation::PortfolioAllocations> {
     use wealthfolio_core::accounts::AccountServiceTrait;
     use wealthfolio_core::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
-
-    let refresh_token = state.secret_store.get_secret(IBKR_REFRESH_TOKEN_KEY).ok()??;
-    if refresh_token.is_empty() {
-        return None;
-    }
 
     let accounts = state.account_service.get_active_non_archived_accounts().ok()?;
     let ibkr = accounts
@@ -135,18 +140,28 @@ pub(crate) async fn allocations_override(
         return None;
     }
 
-    let client = match create_ibkr_client(state) {
-        Ok(client) => client,
+    let stored = match state
+        .broker_snapshot_repository
+        .latest(&ibkr.id, BrokerSnapshotKind::Allocation)
+    {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            info!("[IBKR] No allocation capture stored yet, falling back to local");
+            return None;
+        }
         Err(err) => {
-            info!("[IBKR] Not serving allocations, falling back to local: {err}");
+            error!("[IBKR] Allocation capture unreadable, falling back to local: {err}");
             return None;
         }
     };
 
-    match client.allocations().await {
-        Ok(allocations) => Some(allocations),
+    // The payload is re-mapped on read rather than stored pre-mapped, so a
+    // change to the mapping applies to the whole history instead of only to
+    // captures taken after it.
+    match parse_allocations(stored.payload) {
+        Ok(response) => Some(map_allocations(&response)),
         Err(err) => {
-            error!("[IBKR] Allocation fetch failed, falling back to local: {err}");
+            error!("[IBKR] Stored allocation payload unusable, falling back to local: {err}");
             None
         }
     }
@@ -426,7 +441,73 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
         warn!("[IBKR] NAV history import skipped: {}", err);
     }
 
+    // Record what the broker reported today. Positions, trades and quotes are
+    // already persisted by the orchestrator; these are the figures IBKR derives
+    // itself, which were previously read live and never kept, leaving no record
+    // of what the custodian reported on any past day.
+    if let Err(err) = capture_broker_snapshots(&state, &client).await {
+        warn!("[IBKR] Broker snapshot capture skipped: {}", err);
+    }
+
     Ok(Json(result))
+}
+
+/// Historise the three figures IBKR derives: its allocation breakdown, its
+/// account metrics and its period returns.
+///
+/// Each capture is independent, so one unavailable tool must not cost the
+/// others. A failure here never fails the sync: the portfolio data is already
+/// imported by this point.
+async fn capture_broker_snapshots(state: &AppState, client: &IbkrMcpClient) -> CoreResult<()> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+
+    let accounts = state.account_service.get_active_non_archived_accounts()?;
+    let Some(account) = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
+    else {
+        return Ok(());
+    };
+
+    let as_of = Utc::now().date_naive();
+
+    match client.allocation_payload().await {
+        Ok(payload) => match allocation_snapshot(&account.id, as_of, payload) {
+            Ok(snapshot) => {
+                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
+                    warn!("[IBKR] Allocation capture not stored: {err}");
+                }
+            }
+            Err(err) => warn!("[IBKR] Allocation payload not captured: {err}"),
+        },
+        Err(err) => warn!("[IBKR] Allocation payload unavailable: {err}"),
+    }
+
+    match client.account_summary_payload().await {
+        Ok(payload) => match account_summary_snapshot(&account.id, as_of, payload) {
+            Ok(snapshot) => {
+                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
+                    warn!("[IBKR] Account summary capture not stored: {err}");
+                }
+            }
+            Err(err) => warn!("[IBKR] Account summary payload not captured: {err}"),
+        },
+        Err(err) => warn!("[IBKR] Account summary payload unavailable: {err}"),
+    }
+
+    match client.performance_payload().await {
+        Ok(payload) => match performance_snapshot(&account.id, as_of, payload) {
+            Ok(snapshot) => {
+                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
+                    warn!("[IBKR] Performance capture not stored: {err}");
+                }
+            }
+            Err(err) => warn!("[IBKR] Performance payload not captured: {err}"),
+        },
+        Err(err) => warn!("[IBKR] Performance payload unavailable: {err}"),
+    }
+
+    Ok(())
 }
 
 /// Import one year of daily closing prices from IBKR for every instrument the

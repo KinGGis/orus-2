@@ -135,6 +135,33 @@ diesel::table! {
 }
 
 diesel::table! {
+    broker_snapshots (id) {
+        id -> Text,
+        account_id -> Text,
+        provider -> Text,
+        kind -> Text,
+        as_of_date -> Text,
+        captured_at -> Text,
+        payload -> Text,
+    }
+}
+
+diesel::table! {
+    broker_snapshot_metrics (id) {
+        id -> Text,
+        snapshot_id -> Text,
+        account_id -> Text,
+        as_of_date -> Text,
+        dimension -> Text,
+        category_id -> Text,
+        category_name -> Nullable<Text>,
+        side -> Text,
+        value -> Nullable<Text>,
+        weight -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     brokers_sync_state (account_id, provider) {
         account_id -> Text,
         provider -> Text,
@@ -533,6 +560,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     app_settings,
     asset_taxonomy_assignments,
     assets,
+    broker_snapshot_metrics,
+    broker_snapshots,
     brokers_sync_state,
     contribution_limits,
     daily_account_valuation,

@@ -216,7 +216,23 @@ impl IbkrMcpClient {
         super::allocation::fetch_allocations(&self.mcp).await
     }
 
-    async fn account_summary(&self) -> Result<IbkrAccountSummary> {        let value = self.mcp.call_tool("get_account_summary", json!({})).await?;
+    /// The same allocation call, unparsed, for historisation.
+    pub async fn allocation_payload(&self) -> Result<serde_json::Value> {
+        super::allocation::fetch_allocation_payload(&self.mcp).await
+    }
+
+    pub async fn account_summary_payload(&self) -> Result<serde_json::Value> {
+        self.mcp.call_tool("get_account_summary", json!({})).await
+    }
+
+    pub async fn performance_payload(&self) -> Result<serde_json::Value> {
+        self.mcp
+            .call_tool("get_pa_performance_all_periods", json!({}))
+            .await
+    }
+
+    async fn account_summary(&self) -> Result<IbkrAccountSummary> {
+        let value = self.mcp.call_tool("get_account_summary", json!({})).await?;
         serde_json::from_value(value)
             .map_err(|e| Error::Unexpected(format!("Unexpected IBKR account summary shape: {e}")))
     }
