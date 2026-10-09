@@ -118,6 +118,15 @@ pub struct BrokerAccount {
     /// Whether this account is shared with the household
     #[serde(default)]
     pub shared_with_household: bool,
+
+    /// Which integration produced this account.
+    ///
+    /// Set by the client, not by the remote payload: the same sync pipeline
+    /// serves several brokers, and the resulting local account must say which
+    /// one it came from so the UI can offer the right refresh action. `None`
+    /// means the aggregator, which is what every pre-existing account is.
+    #[serde(default, skip_deserializing)]
+    pub provider: Option<String>,
 }
 
 fn default_sync_enabled() -> bool {
@@ -858,4 +867,22 @@ pub struct UserInfo {
     pub team_id: Option<String>,
     pub team_role: Option<String>,
     pub team: Option<UserTeam>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The aggregator's payload never names a provider, so an account coming
+    /// from it must leave the field empty for the sync to apply its default.
+    /// Only clients that talk to a broker directly set it, in code.
+    #[test]
+    fn remote_payloads_do_not_name_a_provider() {
+        let account: BrokerAccount = serde_json::from_str(
+            r#"{"id":"abc","name":"Margin","provider":"SOMETHING_ELSE"}"#,
+        )
+        .expect("payload should deserialize");
+
+        assert_eq!(account.provider, None);
+    }
 }

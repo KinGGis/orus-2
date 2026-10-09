@@ -529,6 +529,7 @@ impl BrokerApiClient for IbkrMcpClient {
             is_paper: false,
             sync_enabled: true,
             shared_with_household: false,
+            provider: Some(IBKR_SOURCE_SYSTEM.to_string()),
         }])
     }
 
