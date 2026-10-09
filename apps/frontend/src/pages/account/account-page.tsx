@@ -1,6 +1,6 @@
 import { getHoldings, getSnapshots, searchActivities } from "@/adapters";
 import { HistoryChart } from "@/components/history-chart";
-import { runSnaptradeSync } from "@/lib/snaptrade-sync";
+import { brokerIntegrationFor } from "@/lib/broker-sync";
 import type { ActivityDetails } from "@/lib/types";
 import {
   Card,
@@ -125,7 +125,7 @@ const AccountPage = () => {
   const [selectedActivityDate, setSelectedActivityDate] = useState<string | null>(null);
   const [isActivitySheetOpen, setIsActivitySheetOpen] = useState(false);
   const [showBulkHoldingsForm, setShowBulkHoldingsForm] = useState(false);
-  const [isSnaptradeRefreshing, setIsSnaptradeRefreshing] = useState(false);
+  const [isBrokerRefreshing, setIsBrokerRefreshing] = useState(false);
   const [isPreparingThotImport, setIsPreparingThotImport] = useState(false);
   const thotFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -133,8 +133,8 @@ const AccountPage = () => {
   const { accounts, isLoading: isAccountsLoading } = useAccounts();
   const account = useMemo(() => accounts?.find((acc) => acc.id === id), [accounts, id]);
 
-  const isSnaptradeAccount = useMemo(() => {
-    return account?.provider?.toUpperCase() === "SNAPTRADE";
+  const brokerIntegration = useMemo(() => {
+    return brokerIntegrationFor(account?.provider);
   }, [account]);
 
   // Check if this account is in HOLDINGS tracking mode
@@ -311,10 +311,12 @@ const AccountPage = () => {
     setMobileSelectorOpen(false);
   };
 
-  const handleSnaptradeRefresh = async () => {
-    setIsSnaptradeRefreshing(true);
+  const handleBrokerRefresh = async () => {
+    if (!brokerIntegration) return;
+
+    setIsBrokerRefreshing(true);
     try {
-      const result = await runSnaptradeSync();
+      const summary = await brokerIntegration.run();
 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: [QueryKeys.ACCOUNTS] }),
@@ -326,18 +328,18 @@ const AccountPage = () => {
       ]);
 
       toast({
-        title: "SnapTrade rafraichi",
-        description: `✓ ${result.accountsSynced ?? 0} comptes, ${result.activitiesSynced ?? 0} activites synchronises`,
+        title: `${brokerIntegration.label} rafraichi`,
+        description: `✓ ${summary}`,
       });
     } catch (error) {
       toast({
-        title: "Erreur SnapTrade",
+        title: `Erreur ${brokerIntegration.label}`,
         description:
           error instanceof Error ? error.message : "Impossible de rafraichir le portefeuille",
         variant: "destructive",
       });
     } finally {
-      setIsSnaptradeRefreshing(false);
+      setIsBrokerRefreshing(false);
     }
   };
 
@@ -393,6 +395,28 @@ const AccountPage = () => {
     }
   };
 
+  // Shared by both action palette variants below so the refresh entry cannot
+  // drift between them.
+  const manageActionGroup: ActionPaletteGroup = {
+    title: "Manage",
+    items: [
+      ...(brokerIntegration
+        ? [
+            {
+              icon: Icons.Refresh,
+              label: `Refresh ${brokerIntegration.label}`,
+              onClick: handleBrokerRefresh,
+            },
+          ]
+        : []),
+      {
+        icon: Icons.Clock,
+        label: "Recalculate History",
+        onClick: () => recalculatePortfolioMutation.mutate(),
+      },
+    ],
+  };
+
   return (
     <Page>
       <PageHeader
@@ -422,25 +446,8 @@ const AccountPage = () => {
                         },
                       ],
                     },
-                    {
-                      title: "Manage",
-                      items: [
-                        ...(isSnaptradeAccount
-                          ? [
-                              {
-                                icon: Icons.Refresh,
-                                label: "Refresh SnapTrade",
-                                onClick: handleSnaptradeRefresh,
-                              },
-                            ]
-                          : []),
-                        {
-                          icon: Icons.Clock,
-                          label: "Recalculate History",
-                          onClick: () => recalculatePortfolioMutation.mutate(),
-                        },
-                      ],
-                    },
+                    manageActionGroup,
+
                   ] satisfies ActionPaletteGroup[])
                 : ([
                     {
@@ -467,25 +474,8 @@ const AccountPage = () => {
                         },
                       ],
                     },
-                    {
-                      title: "Manage",
-                      items: [
-                        ...(isSnaptradeAccount
-                          ? [
-                              {
-                                icon: Icons.Refresh,
-                                label: "Refresh SnapTrade",
-                                onClick: handleSnaptradeRefresh,
-                              },
-                            ]
-                          : []),
-                        {
-                          icon: Icons.Clock,
-                          label: "Recalculate History",
-                          onClick: () => recalculatePortfolioMutation.mutate(),
-                        },
-                      ],
-                    },
+                    manageActionGroup,
+
                   ] satisfies ActionPaletteGroup[])
             }
           />
@@ -631,17 +621,18 @@ const AccountPage = () => {
         </div>
       </PageHeader>
       <PageContent>
-        {isSnaptradeAccount && (
+        {brokerIntegration && (
           <Card className="mb-4 border-dashed">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Icons.Sparkles className="size-4" />
-                Invite Thot: mise a jour des transactions SnapTrade
+                Invite Thot: mise a jour des transactions
               </CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-muted-foreground text-sm">
-                Uploadez votre Activity Statement IBKR (CSV) pour mettre a jour l'historique des activites de ce portefeuille SnapTrade.
+                Uploadez votre Activity Statement IBKR (CSV) pour completer l'historique des
+                activites au-dela de ce que {brokerIntegration.label} renvoie.
               </p>
               <Button
                 variant="secondary"
@@ -702,21 +693,23 @@ const AccountPage = () => {
                     </PortfolioUpdateTrigger>
                   </CardTitle>
                   <div className="-mt-3 flex items-center gap-1 self-start">
-                    {isSnaptradeAccount && (
+                    {brokerIntegration && (
                       <Button
                         variant="secondary"
                         size="sm"
                         className="h-8 rounded-full"
-                        onClick={handleSnaptradeRefresh}
-                        disabled={isSnaptradeRefreshing}
+                        onClick={handleBrokerRefresh}
+                        disabled={isBrokerRefreshing}
                       >
-                        {isSnaptradeRefreshing ? (
+                        {isBrokerRefreshing ? (
                           <Icons.Spinner className="mr-1 size-4 animate-spin" />
                         ) : (
                           <Icons.Refresh className="mr-1 size-4" />
                         )}
                         <span className="hidden sm:inline">
-                          {isSnaptradeRefreshing ? "Refreshing..." : "Refresh SnapTrade"}
+                          {isBrokerRefreshing
+                            ? "Refreshing..."
+                            : `Refresh ${brokerIntegration.label}`}
                         </span>
                       </Button>
                     )}
