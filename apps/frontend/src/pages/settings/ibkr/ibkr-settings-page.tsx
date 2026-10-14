@@ -91,8 +91,10 @@ export default function IbkrSettingsPage() {
       if (!response.ok) throw new Error(await response.text());
       const result = await response.json();
       toast({
-        title: "Synchronisation terminée",
-        description: result.message ?? "Données IBKR importées.",
+        title: "Synchronisation lancée",
+        description:
+          result.message ??
+          "Synchronisation IBKR lancée. Le résultat s'affichera à la fin.",
       });
     } catch (error) {
       console.error("Error syncing IBKR:", error);

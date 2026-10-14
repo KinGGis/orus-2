@@ -54,6 +54,17 @@ pub trait BrokerApiClient: Send + Sync {
     ///
     /// Returns cash balances, stock/ETF positions, and option positions.
     async fn get_account_holdings(&self, account_id: &str) -> Result<BrokerHoldingsResponse>;
+
+    /// Whether restricting the activity query to an incremental window is
+    /// meaningful for this broker.
+    ///
+    /// A broker that serves one fixed, restatable window gains nothing from the
+    /// restriction and loses everything an interrupted sync failed to import:
+    /// the account is marked synced up to today, so the narrowed window never
+    /// covers those older trades again and the gap becomes permanent.
+    fn supports_incremental_activities(&self) -> bool {
+        true
+    }
 }
 
 /// Trait for platform repository operations

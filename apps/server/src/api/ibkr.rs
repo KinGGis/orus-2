@@ -389,11 +389,64 @@ async fn ensure_holdings_tracking_mode(state: &AppState) -> ApiResult<bool> {
     Ok(true)
 }
 
-/// Run a full sync through the shared orchestrator, so IBKR benefits from the
-/// same pagination, resume and snapshot handling as every other broker.
-async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncResult>> {
+/// Guards against a second sync being started while one is still running.
+///
+/// The endpoint now answers before the work is done, so the button is clickable
+/// again within milliseconds. Two concurrent syncs would hammer the MCP and
+/// race on the same rows for no benefit.
+static IBKR_SYNC_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncStartedResponse {
+    message: String,
+}
+
+/// Start a full sync and answer immediately.
+///
+/// The sync routinely runs for several minutes: it walks five years of daily
+/// bars for every instrument, one MCP call each. The browser does not reach the
+/// server directly — it goes through a proxy rewrite that gives up on the
+/// upstream after about thirty seconds and answers `502`. That is not merely a
+/// cosmetic error: when the proxy drops the connection the server cancels the
+/// request future, so the price history, the NAV import and the broker
+/// snapshots were being aborted midway and never persisted. Running the job
+/// detached from the request is what makes it survive to completion.
+///
+/// Progress and the final outcome already travel over the event bus, which the
+/// frontend consumes through SSE, so nothing is lost by answering early.
+async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncStartedResponse>> {
+    use std::sync::atomic::Ordering;
+
+    // Validate the connection while the caller is still listening: an expired
+    // or missing authorization is the one failure worth reporting synchronously.
     let client = create_ibkr_client(&state)?;
 
+    if IBKR_SYNC_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(Json(SyncStartedResponse {
+            message: "Une synchronisation IBKR est déjà en cours.".to_string(),
+        }));
+    }
+
+    tokio::spawn(async move {
+        if let Err(err) = run_ibkr_sync(state, client).await {
+            error!("[IBKR] Sync failed: {}", err);
+        }
+        IBKR_SYNC_RUNNING.store(false, Ordering::SeqCst);
+    });
+
+    Ok(Json(SyncStartedResponse {
+        message: "Synchronisation IBKR lancée. Le résultat s'affichera à la fin.".to_string(),
+    }))
+}
+
+/// Run a full sync through the shared orchestrator, so IBKR benefits from the
+/// same pagination, resume and snapshot handling as every other broker.
+async fn run_ibkr_sync(state: Arc<AppState>, client: IbkrMcpClient) -> Result<SyncResult, String> {
     let reporter = Arc::new(EventBusProgressReporter::new(state.event_bus.clone()));
     let orchestrator = SyncOrchestrator::new(
         state.connect_sync_service.clone(),
@@ -401,26 +454,19 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
         SyncConfig::default(),
     );
 
-    ensure_holdings_tracking_mode(&state).await?;
+    ensure_holdings_tracking_mode(&state)
+        .await
+        .map_err(|err| err.to_string())?;
 
-    let mut result = match orchestrator.sync_all(&client).await {
-        Ok(result) => result,
-        Err(err) => {
-            error!("[IBKR] Sync failed: {}", err);
-            return Err(ApiError::Internal(err));
-        }
-    };
+    let mut result = orchestrator.sync_all(&client).await?;
 
     // The very first sync creates the account as NOT_SET, so the orchestrator
     // skipped its data. Flip it and replay immediately to keep this one click.
-    if ensure_holdings_tracking_mode(&state).await? {
-        result = orchestrator
-            .sync_all(&client)
-            .await
-            .map_err(|err| {
-                error!("[IBKR] Sync failed after enabling holdings tracking: {}", err);
-                ApiError::Internal(err)
-            })?;
+    if ensure_holdings_tracking_mode(&state)
+        .await
+        .map_err(|err| err.to_string())?
+    {
+        result = orchestrator.sync_all(&client).await?;
     }
 
     info!("[IBKR] Sync completed: {}", result.message);
@@ -449,7 +495,7 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncRes
         warn!("[IBKR] Broker snapshot capture skipped: {}", err);
     }
 
-    Ok(Json(result))
+    Ok(result)
 }
 
 /// Historise the three figures IBKR derives: its allocation breakdown, its
