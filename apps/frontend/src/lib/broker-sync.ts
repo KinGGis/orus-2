@@ -19,10 +19,11 @@ interface IbkrSyncResponse {
 }
 
 /**
- * Runs an IBKR sync.
+ * Starts an IBKR sync.
  *
- * Unlike SnapTrade's, this endpoint does the work inside the request and
- * answers once everything is imported, so there is no progress to poll.
+ * The endpoint answers as soon as the job is accepted, not when it is done:
+ * the import walks years of daily bars and outlives any reasonable request
+ * timeout. The outcome arrives later as a broker sync event.
  */
 async function runIbkrSync(): Promise<string> {
   const response = await fetch("/api/v1/dfc/ibkr/sync", {
@@ -35,7 +36,7 @@ async function runIbkrSync(): Promise<string> {
   }
 
   const result: IbkrSyncResponse = await response.json();
-  return result.message ?? "Données IBKR importées.";
+  return result.message ?? "Synchronisation IBKR lancée.";
 }
 
 async function runSnaptrade(): Promise<string> {

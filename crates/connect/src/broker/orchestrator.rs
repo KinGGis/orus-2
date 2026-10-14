@@ -333,7 +333,11 @@ impl<P: SyncProgressReporter> SyncOrchestrator<P> {
             let mut activity_import_run_id: Option<String> = None;
 
             if activity_warning.is_none() {
-                let query_window = match self.compute_activity_query_window(&account_id, end_date) {
+                let query_window = match self.compute_activity_query_window(
+                    &account_id,
+                    end_date,
+                    api_client.supports_incremental_activities(),
+                ) {
                     Ok(window) => Some(window),
                     Err(err) => {
                         error!(
@@ -915,7 +919,12 @@ impl<P: SyncProgressReporter> SyncOrchestrator<P> {
         &self,
         account_id: &str,
         end_date: chrono::NaiveDate,
+        incremental: bool,
     ) -> Result<(Option<String>, Option<String>), String> {
+        if !incremental {
+            return Ok((None, None));
+        }
+
         let sync_state = self
             .sync_service
             .get_activity_sync_state(account_id)

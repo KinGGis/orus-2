@@ -599,6 +599,14 @@ impl BrokerApiClient for IbkrMcpClient {
         })
     }
 
+    /// IBKR's trade feed is one fixed five-quarter window that the broker
+    /// restates, and `load_trades` fetches the whole thing on every call and
+    /// filters locally. Narrowing the query therefore saves no work and only
+    /// risks hiding trades a previous interrupted sync never imported.
+    fn supports_incremental_activities(&self) -> bool {
+        false
+    }
+
     async fn get_account_holdings(&self, account_id: &str) -> Result<BrokerHoldingsResponse> {
         if account_id != IBKR_ACCOUNT_ID {
             return Ok(BrokerHoldingsResponse::default());
