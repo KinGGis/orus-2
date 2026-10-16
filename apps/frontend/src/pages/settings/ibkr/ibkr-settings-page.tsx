@@ -21,11 +21,37 @@ interface IbkrStatus {
 
 interface IbkrDiagnostic {
   positions: number;
+  positionsPriced: number;
+  unpricedSymbols: string[];
   cashBalances: number;
   activities: number;
+  activitiesMapped: number;
+  storedActivities: number;
+  holdingsError?: string | null;
+  activitiesError?: string | null;
+  storedError?: string | null;
 }
 
 export const IBKR_REDIRECT_PATH = "/ibkr/callback";
+
+/**
+ * Turns a failed response into something worth showing.
+ *
+ * A request to this app does not reach the server directly; it goes through a
+ * proxy rewrite that answers `502` with an HTML page of its own when the
+ * upstream takes too long. Surfacing that page verbatim tells the user nothing,
+ * so name the condition instead.
+ */
+async function describeFailure(response: Response): Promise<string> {
+  if (response.status === 502 || response.status === 504) {
+    return "Le serveur a mis trop de temps à répondre et la passerelle a coupé la connexion. IBKR est probablement lent ou indisponible.";
+  }
+  const body = (await response.text()).trim();
+  if (!body || body.startsWith("<")) {
+    return `Le serveur a répondu ${response.status}.`;
+  }
+  return body;
+}
 
 export default function IbkrSettingsPage() {
   const { toast } = useToast();
@@ -88,7 +114,7 @@ export default function IbkrSettingsPage() {
         method: "POST",
         credentials: "same-origin",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await describeFailure(response));
       const result = await response.json();
       toast({
         title: "Synchronisation lancée",
@@ -99,8 +125,11 @@ export default function IbkrSettingsPage() {
     } catch (error) {
       console.error("Error syncing IBKR:", error);
       toast({
-        title: "Erreur",
-        description: "La synchronisation IBKR a échoué",
+        title: "La synchronisation IBKR a échoué",
+        description:
+          error instanceof Error && error.message
+            ? error.message
+            : "Raison inconnue.",
         variant: "destructive",
       });
     } finally {
@@ -114,13 +143,16 @@ export default function IbkrSettingsPage() {
       const response = await fetch("/api/v1/dfc/ibkr/diagnostic", {
         credentials: "same-origin",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await describeFailure(response));
       setDiagnostic(await response.json());
     } catch (error) {
       console.error("Error running IBKR diagnostic:", error);
       toast({
-        title: "Erreur",
-        description: "Le diagnostic IBKR a échoué",
+        title: "Le diagnostic IBKR a échoué",
+        description:
+          error instanceof Error && error.message
+            ? error.message
+            : "Raison inconnue.",
         variant: "destructive",
       });
     } finally {
@@ -247,15 +279,63 @@ export default function IbkrSettingsPage() {
           </div>
 
           {diagnostic && (
-            <Alert>
-              <Icons.CheckCircle className="h-4 w-4 text-green-500" />
-              <AlertDescription>
-                IBKR déclare {diagnostic.positions} positions ouvertes,{" "}
-                {diagnostic.cashBalances} soldes de trésorerie et{" "}
-                {diagnostic.activities} transactions. Ces chiffres viennent
-                directement du courtier : ils font foi.
-              </AlertDescription>
-            </Alert>
+            <div className="space-y-2">
+              {diagnostic.holdingsError ? (
+                <Alert variant="destructive">
+                  <Icons.AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    Positions illisibles chez IBKR : {diagnostic.holdingsError}
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Alert>
+                  <Icons.CheckCircle className="h-4 w-4 text-green-500" />
+                  <AlertDescription>
+                    IBKR déclare {diagnostic.positions} positions ouvertes (dont{" "}
+                    {diagnostic.positionsPriced} valorisées) et{" "}
+                    {diagnostic.cashBalances} soldes de trésorerie.
+                    {diagnostic.unpricedSymbols.length > 0 && (
+                      <> Sans cours : {diagnostic.unpricedSymbols.join(", ")}.</>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {diagnostic.activitiesError ? (
+                <Alert variant="destructive">
+                  <Icons.AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    Transactions illisibles chez IBKR :{" "}
+                    {diagnostic.activitiesError}
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Alert>
+                  <Icons.CheckCircle className="h-4 w-4 text-green-500" />
+                  <AlertDescription>
+                    IBKR renvoie {diagnostic.activities} transactions, dont{" "}
+                    {diagnostic.activitiesMapped} exploitables par l'import.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {diagnostic.storedError ? (
+                <Alert variant="destructive">
+                  <Icons.AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    Base locale illisible : {diagnostic.storedError}
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Alert>
+                  <Icons.CheckCircle className="h-4 w-4 text-green-500" />
+                  <AlertDescription>
+                    {diagnostic.storedActivities} transactions sont enregistrées
+                    en base pour ce compte.
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>

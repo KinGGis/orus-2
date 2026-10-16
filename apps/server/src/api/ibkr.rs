@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -16,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use rust_decimal::Decimal;
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use wealthfolio_connect::broker::{SyncConfig, SyncOrchestrator, SyncResult};
@@ -760,7 +762,12 @@ async fn import_nav_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> Co
 
 /// Read-only probe that reports what IBKR currently holds, without writing to
 /// the database. Useful to compare the broker's truth against stored snapshots.
-#[derive(Debug, Serialize)]
+///
+/// Every probe is independent and reports its own failure. Collapsing them into
+/// a single error made the one question the diagnostic exists to answer — which
+/// side is empty, the broker or our database — unanswerable, because any one
+/// unavailable tool hid everything the others had to say.
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticResponse {
     positions: usize,
@@ -769,50 +776,113 @@ struct DiagnosticResponse {
     cash_balances: usize,
     activities: usize,
     activities_mapped: usize,
+    /// Activities already persisted for the IBKR account. Answers directly
+    /// whether an empty activity list is an import problem or a broker one.
+    stored_activities: usize,
+    holdings_error: Option<String>,
+    activities_error: Option<String>,
+    stored_error: Option<String>,
 }
 
 async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<DiagnosticResponse>> {
     use wealthfolio_connect::broker::mapping::map_broker_activity;
     use wealthfolio_connect::broker::BrokerApiClient;
+    use wealthfolio_core::accounts::AccountServiceTrait;
 
     let client = create_ibkr_client(&state)?;
+    let mut report = DiagnosticResponse::default();
 
-    let holdings = client
-        .get_account_holdings(IBKR_ACCOUNT_ID)
-        .await
-        .map_err(to_api_error)?;
-    let activities = client
-        .get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(100_000))
-        .await
-        .map_err(to_api_error)?;
+    // The gateway in front of this server abandons a request after roughly
+    // thirty seconds. A probe left unbounded could therefore spend the whole
+    // budget and leave the user with no answer at all, so each one is capped
+    // well below it: a diagnostic that cannot answer in time must still say
+    // what the others found.
+    const HOLDINGS_BUDGET: Duration = Duration::from_secs(8);
+    const ACTIVITIES_BUDGET: Duration = Duration::from_secs(15);
 
-    let positions = holdings.positions.unwrap_or_default();
-    let unpriced_symbols: Vec<String> = positions
-        .iter()
-        .filter(|p| p.price.unwrap_or(0.0) <= 0.0)
-        .map(|p| {
-            p.symbol
-                .as_ref()
-                .and_then(|s| s.symbol.as_ref())
-                .and_then(|s| s.symbol.clone())
-                .unwrap_or_else(|| "<unnamed>".to_string())
-        })
-        .collect();
+    match timeout(HOLDINGS_BUDGET, client.get_account_holdings(IBKR_ACCOUNT_ID)).await {
+        Ok(Ok(holdings)) => {
+            let positions = holdings.positions.unwrap_or_default();
+            let unpriced: Vec<String> = positions
+                .iter()
+                .filter(|p| p.price.unwrap_or(0.0) <= 0.0)
+                .map(|p| {
+                    p.symbol
+                        .as_ref()
+                        .and_then(|s| s.symbol.as_ref())
+                        .and_then(|s| s.symbol.clone())
+                        .unwrap_or_else(|| "<unnamed>".to_string())
+                })
+                .collect();
 
-    let activities_mapped = activities
-        .data
-        .iter()
-        .filter(|a| map_broker_activity(a, IBKR_ACCOUNT_ID, None, None).is_some())
-        .count();
+            report.positions = positions.len();
+            report.positions_priced = positions.len() - unpriced.len();
+            report.unpriced_symbols = unpriced;
+            report.cash_balances = holdings.balances.map(|b| b.len()).unwrap_or(0);
+        }
+        Ok(Err(err)) => {
+            error!("[IBKR] Diagnostic holdings probe failed: {err}");
+            report.holdings_error = Some(err.to_string());
+        }
+        Err(_) => {
+            report.holdings_error = Some(format!(
+                "IBKR n'a pas répondu en moins de {} s.",
+                HOLDINGS_BUDGET.as_secs()
+            ));
+        }
+    }
 
-    Ok(Json(DiagnosticResponse {
-        positions: positions.len(),
-        positions_priced: positions.len() - unpriced_symbols.len(),
-        unpriced_symbols,
-        cash_balances: holdings.balances.map(|b| b.len()).unwrap_or(0),
-        activities: activities.data.len(),
-        activities_mapped,
-    }))
+    match timeout(
+        ACTIVITIES_BUDGET,
+        client.get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(100_000)),
+    )
+    .await
+    {
+        Ok(Ok(activities)) => {
+            report.activities = activities.data.len();
+            report.activities_mapped = activities
+                .data
+                .iter()
+                .filter(|a| map_broker_activity(a, IBKR_ACCOUNT_ID, None, None).is_some())
+                .count();
+        }
+        Ok(Err(err)) => {
+            error!("[IBKR] Diagnostic activities probe failed: {err}");
+            report.activities_error = Some(err.to_string());
+        }
+        Err(_) => {
+            report.activities_error = Some(format!(
+                "IBKR n'a pas répondu en moins de {} s.",
+                ACTIVITIES_BUDGET.as_secs()
+            ));
+        }
+    }
+
+    match state.account_service.get_active_non_archived_accounts() {
+        Ok(accounts) => {
+            match accounts
+                .iter()
+                .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
+            {
+                Some(account) => {
+                    match state
+                        .activity_service
+                        .get_activities_by_account_id(&account.id)
+                    {
+                        Ok(stored) => report.stored_activities = stored.len(),
+                        Err(err) => report.stored_error = Some(err.to_string()),
+                    }
+                }
+                None => {
+                    report.stored_error =
+                        Some("Aucun compte IBKR local : lancez une synchronisation.".to_string())
+                }
+            }
+        }
+        Err(err) => report.stored_error = Some(err.to_string()),
+    }
+
+    Ok(Json(report))
 }
 
 fn to_api_error(err: CoreError) -> ApiError {
