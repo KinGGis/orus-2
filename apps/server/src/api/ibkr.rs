@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::State,
@@ -760,16 +760,70 @@ async fn import_nav_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> Co
     Ok(imported)
 }
 
+/// One timed step of the diagnostic.
+///
+/// A bare timeout says only that something was slow, never what it was waiting
+/// on. Reaching IBKR involves three distinct exchanges — renew the token,
+/// negotiate an MCP session, call the tool — that fail for unrelated reasons
+/// and are fixed in unrelated places. Reporting them separately, each with the
+/// time it actually took, is what turns "ça n'a pas répondu" into something
+/// actionable.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticStage {
+    name: &'static str,
+    ok: bool,
+    elapsed_ms: u64,
+    error: Option<String>,
+}
+
+/// Run one step under its own time budget and record how it went.
+async fn run_stage<T>(
+    name: &'static str,
+    budget: Duration,
+    stages: &mut Vec<DiagnosticStage>,
+    work: impl std::future::Future<Output = CoreResult<T>>,
+) -> Option<T> {
+    let started = Instant::now();
+    let outcome = timeout(budget, work).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    let (ok, error, value) = match outcome {
+        Ok(Ok(value)) => (true, None, Some(value)),
+        Ok(Err(err)) => {
+            error!("[IBKR] Diagnostic stage `{name}` failed: {err}");
+            (false, Some(err.to_string()), None)
+        }
+        Err(_) => (
+            false,
+            Some(format!(
+                "aucune réponse en moins de {} s",
+                budget.as_secs()
+            )),
+            None,
+        ),
+    };
+
+    stages.push(DiagnosticStage {
+        name,
+        ok,
+        elapsed_ms,
+        error,
+    });
+    value
+}
+
 /// Read-only probe that reports what IBKR currently holds, without writing to
 /// the database. Useful to compare the broker's truth against stored snapshots.
 ///
-/// Every probe is independent and reports its own failure. Collapsing them into
+/// Every stage is independent and reports its own failure. Collapsing them into
 /// a single error made the one question the diagnostic exists to answer — which
 /// side is empty, the broker or our database — unanswerable, because any one
 /// unavailable tool hid everything the others had to say.
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticResponse {
+    stages: Vec<DiagnosticStage>,
     positions: usize,
     positions_priced: usize,
     unpriced_symbols: Vec<String>,
@@ -779,8 +833,6 @@ struct DiagnosticResponse {
     /// Activities already persisted for the IBKR account. Answers directly
     /// whether an empty activity list is an import problem or a broker one.
     stored_activities: usize,
-    holdings_error: Option<String>,
-    activities_error: Option<String>,
     stored_error: Option<String>,
 }
 
@@ -791,17 +843,48 @@ async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<Diagno
 
     let client = create_ibkr_client(&state)?;
     let mut report = DiagnosticResponse::default();
+    let mut stages: Vec<DiagnosticStage> = Vec::new();
 
     // The gateway in front of this server abandons a request after roughly
-    // thirty seconds. A probe left unbounded could therefore spend the whole
-    // budget and leave the user with no answer at all, so each one is capped
-    // well below it: a diagnostic that cannot answer in time must still say
-    // what the others found.
-    const HOLDINGS_BUDGET: Duration = Duration::from_secs(8);
-    const ACTIVITIES_BUDGET: Duration = Duration::from_secs(15);
+    // thirty seconds. A stage left unbounded could therefore spend the whole
+    // budget and leave the user with no answer at all, so the budgets are
+    // capped to stay well inside it: a diagnostic that cannot finish must still
+    // report what it learned before giving up.
+    const AUTH_BUDGET: Duration = Duration::from_secs(6);
+    const SESSION_BUDGET: Duration = Duration::from_secs(6);
+    const HOLDINGS_BUDGET: Duration = Duration::from_secs(6);
+    const ACTIVITIES_BUDGET: Duration = Duration::from_secs(8);
 
-    match timeout(HOLDINGS_BUDGET, client.get_account_holdings(IBKR_ACCOUNT_ID)).await {
-        Ok(Ok(holdings)) => {
+    let authenticated = run_stage(
+        "Jeton d'accès",
+        AUTH_BUDGET,
+        &mut stages,
+        client.authenticate(),
+    )
+    .await
+    .is_some();
+
+    // Each later stage repeats the earlier ones internally, so running them
+    // after a failure only re-reports the same problem under another name.
+    let session_open = authenticated
+        && run_stage(
+            "Session MCP",
+            SESSION_BUDGET,
+            &mut stages,
+            client.open_session(),
+        )
+        .await
+        .is_some();
+
+    if session_open {
+        if let Some(holdings) = run_stage(
+            "Positions",
+            HOLDINGS_BUDGET,
+            &mut stages,
+            client.get_account_holdings(IBKR_ACCOUNT_ID),
+        )
+        .await
+        {
             let positions = holdings.positions.unwrap_or_default();
             let unpriced: Vec<String> = positions
                 .iter()
@@ -820,25 +903,15 @@ async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<Diagno
             report.unpriced_symbols = unpriced;
             report.cash_balances = holdings.balances.map(|b| b.len()).unwrap_or(0);
         }
-        Ok(Err(err)) => {
-            error!("[IBKR] Diagnostic holdings probe failed: {err}");
-            report.holdings_error = Some(err.to_string());
-        }
-        Err(_) => {
-            report.holdings_error = Some(format!(
-                "IBKR n'a pas répondu en moins de {} s.",
-                HOLDINGS_BUDGET.as_secs()
-            ));
-        }
-    }
 
-    match timeout(
-        ACTIVITIES_BUDGET,
-        client.get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(100_000)),
-    )
-    .await
-    {
-        Ok(Ok(activities)) => {
+        if let Some(activities) = run_stage(
+            "Transactions",
+            ACTIVITIES_BUDGET,
+            &mut stages,
+            client.get_account_activities(IBKR_ACCOUNT_ID, None, None, Some(0), Some(100_000)),
+        )
+        .await
+        {
             report.activities = activities.data.len();
             report.activities_mapped = activities
                 .data
@@ -846,17 +919,9 @@ async fn diagnostic(State(state): State<Arc<AppState>>) -> ApiResult<Json<Diagno
                 .filter(|a| map_broker_activity(a, IBKR_ACCOUNT_ID, None, None).is_some())
                 .count();
         }
-        Ok(Err(err)) => {
-            error!("[IBKR] Diagnostic activities probe failed: {err}");
-            report.activities_error = Some(err.to_string());
-        }
-        Err(_) => {
-            report.activities_error = Some(format!(
-                "IBKR n'a pas répondu en moins de {} s.",
-                ACTIVITIES_BUDGET.as_secs()
-            ));
-        }
     }
+
+    report.stages = stages;
 
     match state.account_service.get_active_non_archived_accounts() {
         Ok(accounts) => {
