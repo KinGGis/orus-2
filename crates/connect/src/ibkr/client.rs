@@ -208,6 +208,16 @@ impl IbkrMcpClient {
         }
     }
 
+    /// Obtain an access token, touching only IBKR's token endpoint.
+    pub async fn authenticate(&self) -> Result<()> {
+        self.mcp.access_token().await.map(|_| ())
+    }
+
+    /// Negotiate an MCP session, without invoking any tool.
+    pub async fn open_session(&self) -> Result<()> {
+        self.mcp.open_session().await
+    }
+
     /// Portfolio allocations straight from IBKR's own classification, used in
     /// place of the local taxonomy join for this account.
     pub async fn allocations(

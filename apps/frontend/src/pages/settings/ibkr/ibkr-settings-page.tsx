@@ -19,16 +19,22 @@ interface IbkrStatus {
   clientRegistered: boolean;
 }
 
+interface IbkrDiagnosticStage {
+  name: string;
+  ok: boolean;
+  elapsedMs: number;
+  error?: string | null;
+}
+
 interface IbkrDiagnostic {
+  stages: IbkrDiagnosticStage[];
   positions: number;
   positionsPriced: number;
   unpricedSymbols: string[];
-  cashBalances: number;
   activities: number;
+  cashBalances: number;
   activitiesMapped: number;
   storedActivities: number;
-  holdingsError?: string | null;
-  activitiesError?: string | null;
   storedError?: string | null;
 }
 
@@ -51,6 +57,16 @@ async function describeFailure(response: Response): Promise<string> {
     return `Le serveur a répondu ${response.status}.`;
   }
   return body;
+}
+
+/**
+ * Whether a given step of the diagnostic ran and succeeded.
+ *
+ * The server stops at the first failing step, so a step may simply be absent;
+ * its figures are then meaningless and must not be shown as zeroes.
+ */
+function stageSucceeded(diagnostic: IbkrDiagnostic, name: string): boolean {
+  return diagnostic.stages.some((stage) => stage.name === name && stage.ok);
 }
 
 export default function IbkrSettingsPage() {
@@ -280,14 +296,25 @@ export default function IbkrSettingsPage() {
 
           {diagnostic && (
             <div className="space-y-2">
-              {diagnostic.holdingsError ? (
-                <Alert variant="destructive">
-                  <Icons.AlertCircle className="h-4 w-4" />
+              {diagnostic.stages.map((stage) => (
+                <Alert
+                  key={stage.name}
+                  variant={stage.ok ? "default" : "destructive"}
+                >
+                  {stage.ok ? (
+                    <Icons.CheckCircle className="h-4 w-4 text-green-500" />
+                  ) : (
+                    <Icons.AlertCircle className="h-4 w-4" />
+                  )}
                   <AlertDescription>
-                    Positions illisibles chez IBKR : {diagnostic.holdingsError}
+                    {stage.name} — {stage.ok ? "OK" : stage.error}
+                    {" ("}
+                    {(stage.elapsedMs / 1000).toFixed(1)} s{")"}
                   </AlertDescription>
                 </Alert>
-              ) : (
+              ))}
+
+              {stageSucceeded(diagnostic, "Positions") && (
                 <Alert>
                   <Icons.CheckCircle className="h-4 w-4 text-green-500" />
                   <AlertDescription>
@@ -301,15 +328,7 @@ export default function IbkrSettingsPage() {
                 </Alert>
               )}
 
-              {diagnostic.activitiesError ? (
-                <Alert variant="destructive">
-                  <Icons.AlertCircle className="h-4 w-4" />
-                  <AlertDescription>
-                    Transactions illisibles chez IBKR :{" "}
-                    {diagnostic.activitiesError}
-                  </AlertDescription>
-                </Alert>
-              ) : (
+              {stageSucceeded(diagnostic, "Transactions") && (
                 <Alert>
                   <Icons.CheckCircle className="h-4 w-4 text-green-500" />
                   <AlertDescription>

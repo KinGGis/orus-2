@@ -42,9 +42,16 @@ const EXPIRY_SKEW_SECONDS: i64 = 60;
 const USER_AGENT: &str = concat!("Wealthfolio/", env!("CARGO_PKG_VERSION"));
 
 /// Build an HTTP client configured for IBKR's edge.
+///
+/// The timeouts are not tuning. `reqwest` applies none by default, so a
+/// connection IBKR accepts but never answers hangs for as long as the process
+/// lives — and these calls run inside a sync that nothing else bounds. A
+/// request that will not complete must fail and say so.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default()
 }

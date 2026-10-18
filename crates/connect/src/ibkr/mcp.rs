@@ -42,6 +42,19 @@ impl McpClient {
         extract_tool_payload(name, &result)
     }
 
+    /// Acquire an access token without performing any MCP call.
+    ///
+    /// Lets a caller tell an authorization failure apart from an MCP one;
+    /// folded together they look identical and are diagnosed differently.
+    pub async fn access_token(&self) -> Result<String> {
+        self.tokens.access_token().await
+    }
+
+    /// Negotiate an MCP session without invoking a tool.
+    pub async fn open_session(&self) -> Result<()> {
+        self.ensure_session().await
+    }
+
     /// Drop the cached session so the next call renegotiates one.
     pub async fn reset_session(&self) {
         *self.session_id.lock().await = None;
