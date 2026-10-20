@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use wealthfolio_core::errors::{Error, Result};
 
-use super::oauth::{IbkrTokenManager, IBKR_MCP_ENDPOINT};
+use super::oauth::{describe_transport_error, IbkrTokenManager, IBKR_MCP_ENDPOINT};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -152,7 +152,10 @@ impl McpClient {
         }
 
         let response = request.json(body).send().await.map_err(|e| {
-            SendError::Other(Error::Unexpected(format!("IBKR MCP request failed: {e}")))
+            SendError::Other(Error::Unexpected(format!(
+                "IBKR MCP request failed: {}",
+                describe_transport_error(&e)
+            )))
         })?;
 
         let status = response.status();

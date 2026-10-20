@@ -47,13 +47,44 @@ const USER_AGENT: &str = concat!("Wealthfolio/", env!("CARGO_PKG_VERSION"));
 /// connection IBKR accepts but never answers hangs for as long as the process
 /// lives — and these calls run inside a sync that nothing else bounds. A
 /// request that will not complete must fail and say so.
+///
+/// `connect_timeout` is deliberately short: a handshake with a reachable host
+/// completes in well under a second, and the budget is spent twice when DNS
+/// returns both an IPv6 and an IPv4 address and the network drops packets
+/// silently rather than refusing them.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default()
+}
+
+/// Render a transport failure with the cause `reqwest` hides.
+///
+/// A `reqwest::Error` displays as `error sending request for url (…)`, which
+/// says only that the call never reached the server. Whether that is a name it
+/// could not resolve, a connection the network silently dropped, or a TLS
+/// rejection lives in the source chain — and those three are diagnosed in
+/// three different places.
+pub fn describe_transport_error(error: &reqwest::Error) -> String {
+    describe_error_chain(error)
+}
+
+fn describe_error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        let message = source.to_string();
+        // Each layer tends to quote the one below it, so the chain repeats
+        // itself; printing a message already shown adds noise, not detail.
+        if !parts.iter().any(|part| part.contains(&message)) {
+            parts.push(message);
+        }
+        cause = source.source();
+    }
+    parts.join(" <- ")
 }
 
 /// Persistence for the long-lived refresh token.
@@ -136,7 +167,12 @@ pub async fn register_client(
         .json(&body)
         .send()
         .await
-        .map_err(|e| Error::Unexpected(format!("IBKR client registration request failed: {e}")))?;
+        .map_err(|e| {
+            Error::Unexpected(format!(
+                "IBKR client registration request failed: {}",
+                describe_transport_error(&e)
+            ))
+        })?;
 
     let status = response.status();
     let body = response.text().await.map_err(|e| {
@@ -323,7 +359,12 @@ impl IbkrTokenManager {
             .form(params)
             .send()
             .await
-            .map_err(|e| Error::Unexpected(format!("IBKR token request failed: {e}")))?;
+            .map_err(|e| {
+                Error::Unexpected(format!(
+                    "IBKR token request failed: {}",
+                    describe_transport_error(&e)
+                ))
+            })?;
 
         let status = response.status();
         let body = response.text().await.map_err(|e| {
@@ -353,6 +394,59 @@ impl IbkrTokenManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct Layer {
+        message: String,
+        cause: Option<Box<Layer>>,
+    }
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.message)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.cause
+                .as_ref()
+                .map(|c| c.as_ref() as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    fn layer(message: &str, cause: Option<Layer>) -> Layer {
+        Layer {
+            message: message.to_string(),
+            cause: cause.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn error_chain_keeps_the_cause_the_top_message_omits() {
+        let chain = layer(
+            "error sending request for url (https://api.ibkr.com)",
+            Some(layer(
+                "tcp connect error",
+                Some(layer("Connection timed out (os error 110)", None)),
+            )),
+        );
+
+        assert_eq!(
+            describe_error_chain(&chain),
+            "error sending request for url (https://api.ibkr.com) <- tcp connect error <- Connection timed out (os error 110)"
+        );
+    }
+
+    #[test]
+    fn error_chain_drops_a_cause_already_quoted_by_its_parent() {
+        let chain = layer(
+            "request failed: dns error",
+            Some(layer("dns error", None)),
+        );
+
+        assert_eq!(describe_error_chain(&chain), "request failed: dns error");
+    }
 
     #[test]
     fn pkce_challenge_is_sha256_of_verifier() {
