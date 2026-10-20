@@ -18,7 +18,7 @@ pub use client::{
 };
 pub use mcp::McpClient;
 pub use oauth::{
-    build_authorize_url, generate_pkce, generate_state, http_client, register_client,
-    IbkrTokenManager, IbkrTokenStore, PkcePair, IBKR_MCP_ENDPOINT, IBKR_SCOPE,
+    build_authorize_url, describe_transport_error, generate_pkce, generate_state, http_client,
+    register_client, IbkrTokenManager, IbkrTokenStore, PkcePair, IBKR_MCP_ENDPOINT, IBKR_SCOPE,
 };
 pub use snapshot::{account_summary_snapshot, allocation_snapshot, performance_snapshot};
