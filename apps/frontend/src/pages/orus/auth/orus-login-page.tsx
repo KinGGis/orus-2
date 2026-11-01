@@ -60,7 +60,11 @@ export default function OrusLoginPage() {
       // Redirect to dashboard on success
       navigate("/administration");
     } catch (err) {
-      setError("Une erreur est survenue. Veuillez réessayer.");
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Une erreur est survenue. Veuillez réessayer.",
+      );
       console.error("[OrusLogin] Unexpected error:", err);
     } finally {
       setLoading(false);

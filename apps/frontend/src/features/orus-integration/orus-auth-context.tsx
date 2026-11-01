@@ -90,10 +90,12 @@ export function OrusAuthProvider({ children }: { children: ReactNode }) {
     });
 
     if (!response.ok) {
-      let message = "Failed to establish backend session";
+      let message = `Failed to establish backend session (HTTP ${response.status})`;
       try {
         const body = (await response.json()) as { message?: string };
-        message = body.message ?? message;
+        if (body.message) {
+          message = `${body.message} (HTTP ${response.status})`;
+        }
       } catch {
         // Ignore non-JSON error bodies.
       }
