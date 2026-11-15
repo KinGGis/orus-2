@@ -21,7 +21,7 @@ use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use wealthfolio_connect::broker::{SyncConfig, SyncOrchestrator, SyncResult};
-use wealthfolio_connect::broker_ingest::BrokerSnapshotKind;
+use wealthfolio_connect::broker_ingest::{compare_valuations, BrokerSnapshotKind};
 use wealthfolio_connect::ibkr::{
     account_summary_snapshot, allocation_snapshot, build_authorize_url, generate_pkce,
     generate_state, http_client, map_allocations, parse_allocations, performance_snapshot,
@@ -104,6 +104,29 @@ fn create_ibkr_client(state: &AppState) -> ApiResult<IbkrMcpClient> {
 // Allocation override
 // ============================================================================
 
+/// The local IBKR account, when IBKR's own figures may stand in for
+/// `account_id`.
+///
+/// Serving IBKR's numbers for the whole portfolio is only correct when there is
+/// nothing else to aggregate with them.
+fn applicable_ibkr_account_id(state: &AppState, account_id: &str) -> Option<String> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+    use wealthfolio_core::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
+
+    let accounts = state
+        .account_service
+        .get_active_non_archived_accounts()
+        .ok()?;
+    let ibkr = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))?;
+
+    let applies =
+        account_id == ibkr.id || (account_id == PORTFOLIO_TOTAL_ACCOUNT_ID && accounts.len() == 1);
+
+    applies.then(|| ibkr.id.clone())
+}
+
 /// IBKR-sourced allocations for an account, or `None` when the local
 /// computation should be used instead.
 ///
@@ -125,26 +148,11 @@ pub(crate) async fn allocations_override(
     state: &AppState,
     account_id: &str,
 ) -> Option<wealthfolio_core::portfolio::allocation::PortfolioAllocations> {
-    use wealthfolio_core::accounts::AccountServiceTrait;
-    use wealthfolio_core::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
-
-    let accounts = state.account_service.get_active_non_archived_accounts().ok()?;
-    let ibkr = accounts
-        .iter()
-        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))?;
-
-    // Serving IBKR's numbers for the whole portfolio is only correct when there
-    // is nothing else to aggregate with them.
-    let applies = account_id == ibkr.id
-        || (account_id == PORTFOLIO_TOTAL_ACCOUNT_ID && accounts.len() == 1);
-
-    if !applies {
-        return None;
-    }
+    let ibkr_id = applicable_ibkr_account_id(state, account_id)?;
 
     let stored = match state
         .broker_snapshot_repository
-        .latest(&ibkr.id, BrokerSnapshotKind::Allocation)
+        .latest(&ibkr_id, BrokerSnapshotKind::Allocation)
     {
         Ok(Some(stored)) => stored,
         Ok(None) => {
@@ -167,6 +175,88 @@ pub(crate) async fn allocations_override(
             None
         }
     }
+}
+
+/// What IBKR reported an account was worth, as recorded by the last sync.
+pub(crate) struct BrokerAccountValue {
+    pub total_value: Decimal,
+    pub currency: Option<String>,
+    pub as_of_date: NaiveDate,
+}
+
+/// Reads the stored account summary of one exact local account.
+///
+/// Returns `None` rather than an error: a missing or unreadable capture should
+/// leave the computed total in place, not blank the card.
+fn broker_account_value(state: &AppState, ibkr_account_id: &str) -> Option<BrokerAccountValue> {
+    use wealthfolio_connect::ibkr::models::IbkrAccountSummary;
+
+    let stored = match state
+        .broker_snapshot_repository
+        .latest(ibkr_account_id, BrokerSnapshotKind::AccountSummary)
+    {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            info!("[IBKR] No account summary captured yet, falling back to local");
+            return None;
+        }
+        Err(err) => {
+            error!("[IBKR] Account summary capture unreadable, falling back to local: {err}");
+            return None;
+        }
+    };
+
+    let as_of_date = stored.as_of_date;
+    let summary: IbkrAccountSummary = match serde_json::from_value(stored.payload) {
+        Ok(summary) => summary,
+        Err(err) => {
+            error!("[IBKR] Stored account summary unusable, falling back to local: {err}");
+            return None;
+        }
+    };
+
+    Some(BrokerAccountValue {
+        total_value: Decimal::from_f64_retain(summary.net_liquidation?)?,
+        currency: summary.currency,
+        as_of_date,
+    })
+}
+
+/// IBKR's own valuation and the local account ids it stands for.
+///
+/// `net_liquidation` is what the custodian says the account is worth, which is
+/// the figure a statement is reconciled against. Our total is derived from
+/// holdings and quotes and can drift from it, so IBKR's number is the one shown
+/// while the computed one stays available side by side through
+/// `/dfc/ibkr/reconciliation`.
+///
+/// This resolves everything once and returns the ids the figure applies to,
+/// rather than answering per account: it sits on the dashboard's critical path,
+/// and asking account by account would issue one account query and one snapshot
+/// read per row.
+pub(crate) fn account_value_override(
+    state: &AppState,
+) -> Option<(Vec<String>, BrokerAccountValue)> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+    use wealthfolio_core::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
+
+    let accounts = state
+        .account_service
+        .get_active_non_archived_accounts()
+        .ok()?;
+    let ibkr = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))?;
+
+    let mut account_ids = vec![ibkr.id.clone()];
+    // Standing in for the whole portfolio is only correct when there is
+    // nothing else to aggregate IBKR's figure with.
+    if accounts.len() == 1 {
+        account_ids.push(PORTFOLIO_TOTAL_ACCOUNT_ID.to_string());
+    }
+
+    let value = broker_account_value(state, &ibkr.id)?;
+    Some((account_ids, value))
 }
 
 // ============================================================================
@@ -1040,6 +1130,62 @@ async fn get_snapshot_history(
     ))
 }
 
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationResponse {
+    account_id: Option<String>,
+    as_of_date: Option<NaiveDate>,
+    currency: Option<String>,
+    broker_total_value: Option<Decimal>,
+    local_total_value: Option<Decimal>,
+    difference: Option<Decimal>,
+    difference_percent: Option<Decimal>,
+}
+
+/// IBKR's valuation of the account next to the one we compute.
+///
+/// The cards now show IBKR's `net_liquidation`, so the computed total needs a
+/// place where it stays visible: an unexplained gap between the custodian's
+/// figure and our own is exactly what a track-record audit looks for.
+///
+/// `difference` is the broker figure minus ours, so a positive number means
+/// IBKR values the account above our computation. It is left `None` unless both
+/// sides are known, rather than treating a missing side as zero.
+async fn get_reconciliation(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<ReconciliationResponse>> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+
+    let accounts = state.account_service.get_active_non_archived_accounts()?;
+    let Some(ibkr) = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
+    else {
+        return Ok(Json(ReconciliationResponse::default()));
+    };
+
+    let broker = broker_account_value(&state, &ibkr.id);
+    let local = state
+        .performance_service
+        .calculate_accounts_simple_performance(&[ibkr.id.clone()])?
+        .into_iter()
+        .next()
+        .and_then(|metrics| metrics.total_value);
+
+    let broker_total_value = broker.as_ref().map(|value| value.total_value);
+    let gap = compare_valuations(broker_total_value, local);
+
+    Ok(Json(ReconciliationResponse {
+        account_id: Some(ibkr.id.clone()),
+        as_of_date: broker.as_ref().map(|value| value.as_of_date),
+        currency: broker.and_then(|value| value.currency),
+        broker_total_value,
+        local_total_value: local,
+        difference: gap.difference,
+        difference_percent: gap.difference_percent,
+    }))
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/dfc/ibkr/status", get(get_status))
@@ -1049,4 +1195,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/dfc/ibkr/sync", post(sync_ibkr))
         .route("/dfc/ibkr/diagnostic", get(diagnostic))
         .route("/dfc/ibkr/snapshots", get(get_snapshot_history))
+        .route("/dfc/ibkr/reconciliation", get(get_reconciliation))
 }

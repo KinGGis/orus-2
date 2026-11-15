@@ -38,6 +38,24 @@ async fn calculate_accounts_simple_performance(
     let metrics = state
         .performance_service
         .calculate_accounts_simple_performance(&ids)?;
+
+    // IBKR's own valuation replaces the computed one for the account it
+    // custodies: that is the figure a statement is reconciled against. The
+    // computed total stays reachable through `/dfc/ibkr/reconciliation`, which
+    // also reports the gap between the two.
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    let metrics = {
+        let mut metrics = metrics;
+        if let Some((account_ids, broker)) = crate::api::ibkr::account_value_override(&state) {
+            for entry in metrics.iter_mut() {
+                if account_ids.iter().any(|id| id == &entry.account_id) {
+                    entry.total_value = Some(broker.total_value);
+                }
+            }
+        }
+        metrics
+    };
+
     Ok(Json(metrics))
 }
 
