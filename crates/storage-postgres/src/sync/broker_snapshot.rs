@@ -159,4 +159,67 @@ impl BrokerSnapshotRepositoryTrait for BrokerSnapshotRepository {
             payload: row.payload,
         }))
     }
+
+    fn by_date(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        as_of_date: NaiveDate,
+    ) -> Result<Option<StoredBrokerSnapshot>> {
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let mut conn = get_connection(&self.pool)?;
+
+        let row = wf_broker_snapshots::table
+            .filter(wf_broker_snapshots::account_id.eq(account_id))
+            .filter(wf_broker_snapshots::kind.eq(kind.as_str()))
+            .filter(wf_broker_snapshots::as_of_date.eq(as_of_date))
+            .select(BrokerSnapshotDB::as_select())
+            .first::<BrokerSnapshotDB>(&mut conn)
+            .optional()
+            .map_err(|err| Error::Repository(err.to_string()))?;
+
+        Ok(row.map(|row| StoredBrokerSnapshot {
+            as_of_date: row.as_of_date,
+            captured_at: row.captured_at,
+            payload: row.payload,
+        }))
+    }
+
+    fn list_range(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+    ) -> Result<Vec<StoredBrokerSnapshot>> {
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let mut conn = get_connection(&self.pool)?;
+
+        let mut query = wf_broker_snapshots::table
+            .filter(wf_broker_snapshots::account_id.eq(account_id))
+            .filter(wf_broker_snapshots::kind.eq(kind.as_str()))
+            .into_boxed();
+
+        if let Some(from) = from {
+            query = query.filter(wf_broker_snapshots::as_of_date.ge(from));
+        }
+        if let Some(to) = to {
+            query = query.filter(wf_broker_snapshots::as_of_date.le(to));
+        }
+
+        let rows = query
+            .order(wf_broker_snapshots::as_of_date.asc())
+            .select(BrokerSnapshotDB::as_select())
+            .load::<BrokerSnapshotDB>(&mut conn)
+            .map_err(|err| Error::Repository(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| StoredBrokerSnapshot {
+                as_of_date: row.as_of_date,
+                captured_at: row.captured_at,
+                payload: row.payload,
+            })
+            .collect())
+    }
 }

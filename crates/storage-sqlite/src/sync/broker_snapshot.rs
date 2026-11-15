@@ -48,6 +48,17 @@ struct BrokerSnapshotMetricDB {
     weight: Option<String>,
 }
 
+fn to_stored(row: BrokerSnapshotDB) -> Result<StoredBrokerSnapshot> {
+    Ok(StoredBrokerSnapshot {
+        as_of_date: NaiveDate::parse_from_str(&row.as_of_date, DATE_FORMAT)
+            .unwrap_or_else(|_| Utc::now().date_naive()),
+        captured_at: DateTime::parse_from_rfc3339(&row.captured_at)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+        payload: serde_json::Value::from_str(&row.payload)?,
+    })
+}
+
 pub struct BrokerSnapshotRepository {
     pool: Arc<Pool<r2d2::ConnectionManager<SqliteConnection>>>,
     writer: WriteHandle,
@@ -153,13 +164,65 @@ impl BrokerSnapshotRepositoryTrait for BrokerSnapshotRepository {
             return Ok(None);
         };
 
-        Ok(Some(StoredBrokerSnapshot {
-            as_of_date: NaiveDate::parse_from_str(&row.as_of_date, DATE_FORMAT)
-                .unwrap_or_else(|_| Utc::now().date_naive()),
-            captured_at: DateTime::parse_from_rfc3339(&row.captured_at)
-                .map(|value| value.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            payload: serde_json::Value::from_str(&row.payload)?,
-        }))
+        to_stored(row).map(Some)
+    }
+
+    fn by_date(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        as_of_date: NaiveDate,
+    ) -> Result<Option<StoredBrokerSnapshot>> {
+        let mut conn = get_connection(&self.pool)?;
+        let as_of_date = as_of_date.format(DATE_FORMAT).to_string();
+
+        let row = broker_snapshots::table
+            .filter(broker_snapshots::account_id.eq(account_id))
+            .filter(broker_snapshots::kind.eq(kind.as_str()))
+            .filter(broker_snapshots::as_of_date.eq(&as_of_date))
+            .select(BrokerSnapshotDB::as_select())
+            .first::<BrokerSnapshotDB>(&mut conn)
+            .optional()
+            .map_err(StorageError::from)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        to_stored(row).map(Some)
+    }
+
+    fn list_range(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+    ) -> Result<Vec<StoredBrokerSnapshot>> {
+        let mut conn = get_connection(&self.pool)?;
+
+        let mut query = broker_snapshots::table
+            .filter(broker_snapshots::account_id.eq(account_id))
+            .filter(broker_snapshots::kind.eq(kind.as_str()))
+            .into_boxed();
+
+        // Dates are stored as zero-padded `YYYY-MM-DD`, so lexicographic
+        // comparison and chronological comparison agree.
+        if let Some(from) = from {
+            let from = from.format(DATE_FORMAT).to_string();
+            query = query.filter(broker_snapshots::as_of_date.ge(from));
+        }
+        if let Some(to) = to {
+            let to = to.format(DATE_FORMAT).to_string();
+            query = query.filter(broker_snapshots::as_of_date.le(to));
+        }
+
+        let rows = query
+            .order(broker_snapshots::as_of_date.asc())
+            .select(BrokerSnapshotDB::as_select())
+            .load::<BrokerSnapshotDB>(&mut conn)
+            .map_err(StorageError::from)?;
+
+        rows.into_iter().map(to_stored).collect()
     }
 }
