@@ -11,6 +11,7 @@ import {
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Separator } from "@wealthfolio/ui/components/ui/separator";
 import { useToast } from "@wealthfolio/ui/components/ui/use-toast";
+import { formatAmount } from "@wealthfolio/ui";
 import { useCallback, useEffect, useState } from "react";
 import { SettingsHeader } from "../settings-header";
 
@@ -36,6 +37,22 @@ interface IbkrDiagnostic {
   activitiesMapped: number;
   storedActivities: number;
   storedError?: string | null;
+}
+
+/**
+ * IBKR's valuation of the account next to the one the app computes.
+ *
+ * Every figure is nullable on purpose: a side that could not be established is
+ * reported as absent rather than as zero, which would read as a real gap.
+ */
+interface IbkrReconciliation {
+  accountId: string | null;
+  asOfDate: string | null;
+  currency: string | null;
+  brokerTotalValue: number | string | null;
+  localTotalValue: number | string | null;
+  difference: number | string | null;
+  differencePercent: number | string | null;
 }
 
 export const IBKR_REDIRECT_PATH = "/ibkr/callback";
@@ -73,6 +90,9 @@ export default function IbkrSettingsPage() {
   const { toast } = useToast();
   const [status, setStatus] = useState<IbkrStatus | null>(null);
   const [diagnostic, setDiagnostic] = useState<IbkrDiagnostic | null>(null);
+  const [reconciliation, setReconciliation] =
+    useState<IbkrReconciliation | null>(null);
+  const [isReconciling, setIsReconciling] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -176,6 +196,29 @@ export default function IbkrSettingsPage() {
     }
   };
 
+  const handleReconciliation = async () => {
+    setIsReconciling(true);
+    try {
+      const response = await fetch("/api/v1/dfc/ibkr/reconciliation", {
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(await describeFailure(response));
+      setReconciliation(await response.json());
+    } catch (error) {
+      console.error("Error running IBKR reconciliation:", error);
+      toast({
+        title: "La réconciliation IBKR a échoué",
+        description:
+          error instanceof Error && error.message
+            ? error.message
+            : "Raison inconnue.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
   const handleDisconnect = async () => {
     setIsDisconnecting(true);
     try {
@@ -185,6 +228,7 @@ export default function IbkrSettingsPage() {
       });
       if (!response.ok) throw new Error(await response.text());
       setDiagnostic(null);
+      setReconciliation(null);
       await fetchStatus();
       toast({ title: "IBKR déconnecté" });
     } catch (error) {
@@ -280,6 +324,18 @@ export default function IbkrSettingsPage() {
                 </Button>
                 <Button
                   variant="outline"
+                  onClick={handleReconciliation}
+                  disabled={isReconciling}
+                >
+                  {isReconciling ? (
+                    <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Icons.Percent className="mr-2 h-4 w-4" />
+                  )}
+                  Réconciliation
+                </Button>
+                <Button
+                  variant="outline"
                   onClick={handleDisconnect}
                   disabled={isDisconnecting}
                 >
@@ -353,6 +409,73 @@ export default function IbkrSettingsPage() {
                     en base pour ce compte.
                   </AlertDescription>
                 </Alert>
+              )}
+            </div>
+          )}
+          {reconciliation && (
+            <div className="space-y-2">
+              {reconciliation.brokerTotalValue == null &&
+              reconciliation.localTotalValue == null ? (
+                <Alert>
+                  <Icons.AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    Aucune valorisation disponible. Lancez une synchronisation
+                    pour enregistrer la valorisation d'IBKR.
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-lg border p-3">
+                      <p className="text-muted-foreground text-xs">
+                        Valorisation IBKR
+                      </p>
+                      <p className="text-lg font-semibold">
+                        {formatAmount(
+                          reconciliation.brokerTotalValue,
+                          reconciliation.currency ?? "USD",
+                        )}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <p className="text-muted-foreground text-xs">
+                        Valorisation calculée
+                      </p>
+                      <p className="text-lg font-semibold">
+                        {formatAmount(
+                          reconciliation.localTotalValue,
+                          reconciliation.currency ?? "USD",
+                        )}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <p className="text-muted-foreground text-xs">Écart</p>
+                      <p className="text-lg font-semibold">
+                        {formatAmount(
+                          reconciliation.difference,
+                          reconciliation.currency ?? "USD",
+                        )}
+                        {reconciliation.differencePercent != null && (
+                          <span className="text-muted-foreground ml-2 text-sm font-normal">
+                            ({Number(reconciliation.differencePercent).toFixed(2)}
+                            %)
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="text-muted-foreground text-xs">
+                    La valorisation IBKR est celle enregistrée lors du dernier
+                    sync
+                    {reconciliation.asOfDate
+                      ? ` (${reconciliation.asOfDate})`
+                      : ""}
+                    . La valorisation calculée est reconstituée à partir des
+                    activités en base. Un écart signale une divergence à
+                    instruire, pas nécessairement une erreur : les deux chiffres
+                    peuvent dater de deux instants différents.
+                  </p>
+                </>
               )}
             </div>
           )}
