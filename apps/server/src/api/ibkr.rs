@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     routing::{delete, get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
@@ -30,16 +30,16 @@ use wealthfolio_connect::ibkr::{
 };
 use wealthfolio_core::assets::InstrumentType;
 use wealthfolio_core::errors::{Error as CoreError, Result as CoreResult};
+use wealthfolio_core::portfolio::snapshot::SnapshotRecalcMode;
 use wealthfolio_core::portfolio::valuation::{
     DailyAccountValuation, ValuationRecalcMode, ValuationSource,
 };
-use wealthfolio_core::portfolio::snapshot::SnapshotRecalcMode;
 use wealthfolio_core::quotes::{DataSource, MarketSyncMode, Quote};
 use wealthfolio_core::secrets::SecretStore;
 
 use crate::{
     api::connect::EventBusProgressReporter,
-    api::shared::{enqueue_portfolio_job, PortfolioJobConfig},
+    api::shared::{enqueue_portfolio_job, parse_date_optional, PortfolioJobConfig},
     error::{ApiError, ApiResult},
     main_lib::AppState,
 };
@@ -954,6 +954,92 @@ fn to_api_error(err: CoreError) -> ApiError {
     ApiError::Internal(err.to_string())
 }
 
+// ============================================================================
+// Capture history
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotHistoryQuery {
+    kind: String,
+    from: Option<String>,
+    to: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotHistoryEntry {
+    as_of_date: NaiveDate,
+    captured_at: DateTime<Utc>,
+    payload: serde_json::Value,
+}
+
+fn parse_snapshot_kind(raw: &str) -> ApiResult<BrokerSnapshotKind> {
+    match raw.to_uppercase().as_str() {
+        "ALLOCATION" => Ok(BrokerSnapshotKind::Allocation),
+        "ACCOUNT_SUMMARY" => Ok(BrokerSnapshotKind::AccountSummary),
+        "PERFORMANCE" => Ok(BrokerSnapshotKind::Performance),
+        other => Err(ApiError::BadRequest(format!(
+            "Unknown snapshot kind '{other}': expected ALLOCATION, ACCOUNT_SUMMARY or PERFORMANCE"
+        ))),
+    }
+}
+
+/// What IBKR reported, day by day, as recorded by past syncs.
+///
+/// This is the read side the captures were introduced for. The figures come
+/// from our own table, so answering "what did the custodian report on that
+/// date" never depends on IBKR being reachable, and a day stays readable once
+/// later syncs have overwritten what `latest` returns.
+///
+/// The account is resolved against *all* accounts rather than the active ones:
+/// archiving an account must not make the evidence of what it held disappear.
+///
+/// An absent IBKR account yields an empty list rather than a 404 — a portfolio
+/// that was never synced has no history, which is not an error.
+async fn get_snapshot_history(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SnapshotHistoryQuery>,
+) -> ApiResult<Json<Vec<SnapshotHistoryEntry>>> {
+    use wealthfolio_core::accounts::AccountServiceTrait;
+
+    let kind = parse_snapshot_kind(&query.kind)?;
+    let from = parse_date_optional(query.from, "from")?;
+    let to = parse_date_optional(query.to, "to")?;
+
+    if let (Some(from), Some(to)) = (from, to) {
+        if from > to {
+            return Err(ApiError::BadRequest(
+                "'from' must not be later than 'to'".to_string(),
+            ));
+        }
+    }
+
+    let accounts = state.account_service.get_all_accounts()?;
+    let Some(ibkr) = accounts
+        .iter()
+        .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
+    else {
+        return Ok(Json(Vec::new()));
+    };
+
+    let stored = state
+        .broker_snapshot_repository
+        .list_range(&ibkr.id, kind, from, to)
+        .map_err(to_api_error)?;
+
+    Ok(Json(
+        stored
+            .into_iter()
+            .map(|snapshot| SnapshotHistoryEntry {
+                as_of_date: snapshot.as_of_date,
+                captured_at: snapshot.captured_at,
+                payload: snapshot.payload,
+            })
+            .collect(),
+    ))
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/dfc/ibkr/status", get(get_status))
@@ -962,5 +1048,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/dfc/ibkr/connection", delete(disconnect))
         .route("/dfc/ibkr/sync", post(sync_ibkr))
         .route("/dfc/ibkr/diagnostic", get(diagnostic))
+        .route("/dfc/ibkr/snapshots", get(get_snapshot_history))
 }
-

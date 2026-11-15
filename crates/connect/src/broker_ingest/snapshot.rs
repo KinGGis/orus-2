@@ -120,4 +120,27 @@ pub trait BrokerSnapshotRepositoryTrait: Send + Sync {
         account_id: &str,
         kind: BrokerSnapshotKind,
     ) -> Result<Option<StoredBrokerSnapshot>>;
+
+    /// The capture held for one exact day, if any.
+    ///
+    /// An audit asks what the custodian reported on a given date, which
+    /// `latest` cannot answer once a newer sync has run.
+    fn by_date(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        as_of_date: NaiveDate,
+    ) -> Result<Option<StoredBrokerSnapshot>>;
+
+    /// Every capture of a kind within an inclusive date range, oldest first.
+    ///
+    /// Bounds are optional so the whole retained history can be read without
+    /// knowing when captures started.
+    fn list_range(
+        &self,
+        account_id: &str,
+        kind: BrokerSnapshotKind,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+    ) -> Result<Vec<StoredBrokerSnapshot>>;
 }
