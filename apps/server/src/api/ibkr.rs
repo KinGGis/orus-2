@@ -54,6 +54,11 @@ const IBKR_PKCE_VERIFIER_KEY: &str = "ibkr_pkce_verifier";
 const IBKR_OAUTH_STATE_KEY: &str = "ibkr_oauth_state";
 /// Redirect URI of the in-flight authorization; it must match at exchange time.
 const IBKR_REDIRECT_URI_KEY: &str = "ibkr_redirect_uri";
+/// Redirect URI `ibkr_client_id` was registered with. IBKR rejects any other.
+const IBKR_CLIENT_REDIRECT_URI_KEY: &str = "ibkr_client_redirect_uri";
+/// Client id of the in-flight authorization, promoted only once the exchange
+/// succeeds so a failed attempt never orphans the existing grant.
+const IBKR_AUTH_CLIENT_ID_KEY: &str = "ibkr_auth_client_id";
 
 /// Adapts the application secret store to the token store the IBKR client needs.
 struct SecretStoreTokens {
@@ -310,9 +315,15 @@ async fn get_auth_url(
         return Err(ApiError::BadRequest("redirectUri is required".to_string()));
     }
 
-    let client_id = match state.secret_store.get_secret(IBKR_CLIENT_ID_KEY)? {
-        Some(existing) => existing,
-        None => {
+    // A client only works for the redirect URI it was registered with, so a
+    // different app origin (preview, preprod, prod) needs its own client.
+    let existing_client = state.secret_store.get_secret(IBKR_CLIENT_ID_KEY)?;
+    let registered_for = state
+        .secret_store
+        .get_secret(IBKR_CLIENT_REDIRECT_URI_KEY)?;
+    let client_id = match existing_client {
+        Some(existing) if registered_for.as_deref() == Some(body.redirect_uri.as_str()) => existing,
+        _ => {
             let registered = register_client(
                 &http_client(),
                 "Orus Portfolio Sync",
@@ -320,13 +331,13 @@ async fn get_auth_url(
             )
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-            state
-                .secret_store
-                .set_secret(IBKR_CLIENT_ID_KEY, &registered)?;
             info!("[IBKR] Registered a new OAuth client with IBKR");
             registered
         }
     };
+    state
+        .secret_store
+        .set_secret(IBKR_AUTH_CLIENT_ID_KEY, &client_id)?;
 
     let pkce = generate_pkce();
     let csrf_state = generate_state();
@@ -384,14 +395,15 @@ async fn handle_callback(
         .secret_store
         .get_secret(IBKR_REDIRECT_URI_KEY)?
         .ok_or_else(|| ApiError::BadRequest("Missing IBKR redirect URI".to_string()))?;
-    let client_id = state
-        .secret_store
-        .get_secret(IBKR_CLIENT_ID_KEY)?
-        .ok_or_else(|| ApiError::BadRequest("No IBKR OAuth client registered".to_string()))?;
+    let client_id = match state.secret_store.get_secret(IBKR_AUTH_CLIENT_ID_KEY)? {
+        Some(id) => Some(id),
+        None => state.secret_store.get_secret(IBKR_CLIENT_ID_KEY)?,
+    }
+    .ok_or_else(|| ApiError::BadRequest("No IBKR OAuth client registered".to_string()))?;
 
     let tokens = IbkrTokenManager::new(
         http_client(),
-        client_id,
+        client_id.clone(),
         Arc::new(SecretStoreTokens {
             secrets: state.secret_store.clone(),
         }),
@@ -401,9 +413,18 @@ async fn handle_callback(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    // The new refresh token belongs to this client, so it becomes the client.
+    state
+        .secret_store
+        .set_secret(IBKR_CLIENT_ID_KEY, &client_id)?;
+    state
+        .secret_store
+        .set_secret(IBKR_CLIENT_REDIRECT_URI_KEY, &redirect_uri)?;
+
     // The single-use authorization artefacts must not outlive the exchange.
     let _ = state.secret_store.delete_secret(IBKR_PKCE_VERIFIER_KEY);
     let _ = state.secret_store.delete_secret(IBKR_OAUTH_STATE_KEY);
+    let _ = state.secret_store.delete_secret(IBKR_AUTH_CLIENT_ID_KEY);
 
     info!("[IBKR] Authorization complete; refresh token stored");
     Ok(Json(StatusResponse {
@@ -419,6 +440,7 @@ async fn disconnect(State(state): State<Arc<AppState>>) -> ApiResult<Json<Status
     let _ = state.secret_store.delete_secret(IBKR_PKCE_VERIFIER_KEY);
     let _ = state.secret_store.delete_secret(IBKR_OAUTH_STATE_KEY);
     let _ = state.secret_store.delete_secret(IBKR_REDIRECT_URI_KEY);
+    let _ = state.secret_store.delete_secret(IBKR_AUTH_CLIENT_ID_KEY);
 
     Ok(Json(StatusResponse {
         connected: false,
