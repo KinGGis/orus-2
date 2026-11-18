@@ -223,7 +223,11 @@ pub struct SnapTradeExchange {
 #[serde(rename_all = "camelCase")]
 pub struct SnapTradeActivity {
     pub id: Option<String>,
+    // The activities endpoint answers in snake_case; without these aliases the
+    // dates were silently dropped and every activity was dated on sync day.
+    #[serde(alias = "trade_date")]
     pub trade_date: Option<String>,
+    #[serde(alias = "settlement_date")]
     pub settlement_date: Option<String>,
     #[serde(alias = "type")]
     pub action: Option<String>,
@@ -234,6 +238,7 @@ pub struct SnapTradeActivity {
     pub currency: Option<SnapTradeCurrency>,
     pub description: Option<String>,
     pub account: Option<SnapTradeAccountRef>,
+    #[serde(alias = "external_reference_id")]
     pub external_reference_id: Option<String>,
 }
 
@@ -638,7 +643,10 @@ pub fn map_snaptrade_action(action: &str) -> &'static str {
         "TRANSFER" | "TRANSFER_IN" => "TRANSFER_IN",
         "TRANSFER_OUT" => "TRANSFER_OUT",
         "SPLIT" => "SPLIT",
-        _ => "OTHER",
+        other => {
+            log::warn!("Unmapped SnapTrade activity type '{}', stored as OTHER", other);
+            "OTHER"
+        }
     }
 }
 
@@ -797,7 +805,15 @@ mod tests {
         assert!(result.is_ok());
         let activity = result.unwrap();
         assert_eq!(activity.id, Some("act-123".to_string()));
+        assert_eq!(activity.trade_date.as_deref(), Some("2026-03-19"));
         assert!(activity.price.is_none());
+
+        let with_settlement: SnapTradeActivity =
+            serde_json::from_str(r#"{"settlement_date": "2026-03-21T00:00:00Z"}"#).unwrap();
+        assert_eq!(
+            with_settlement.settlement_date.as_deref(),
+            Some("2026-03-21T00:00:00Z")
+        );
         assert!(activity.symbol.is_none());
 
         // Test with all null/missing fields
