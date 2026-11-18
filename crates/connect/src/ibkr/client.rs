@@ -39,6 +39,20 @@ pub const IBKR_BROKERAGE_ID: &str = "ibkr-mcp-brokerage";
 pub const IBKR_BROKERAGE_SLUG: &str = "INTERACTIVE_BROKERS";
 pub const IBKR_SOURCE_SYSTEM: &str = "IBKR_MCP";
 
+/// Tools IBKR's MCP exposed on 2026-10-07; none returns cash movements.
+const KNOWN_MCP_TOOLS: &[&str] = &[
+    "create_alert", "delete_alert", "get_alert", "get_alerts", "set_alert_status",
+    "update_alert", "search_contracts", "get_combo_identifier", "get_option_data",
+    "get_option_parameters", "search_futures", "provide_customer_feedback",
+    "get_company_connections", "get_company_themes", "get_theme_details",
+    "search_investment_topics", "get_price_history", "get_price_snapshot",
+    "create_order_instruction", "delete_order_instruction", "get_order_instructions",
+    "get_account_orders", "get_pa_allocation", "get_pa_performance_all_periods",
+    "get_account_balances", "get_account_positions", "get_account_summary",
+    "get_account_trades", "create_watchlist", "delete_watchlist", "edit_watchlist",
+    "get_watchlist", "get_watchlists", "whats_new",
+];
+
 const DEFAULT_PAGE_LIMIT: i64 = 500;
 
 /// Daily net asset value history reported by IBKR for the connected account.
@@ -218,6 +232,30 @@ impl IbkrMcpClient {
         self.mcp.open_session().await
     }
 
+    /// Cash movements (dividends, interest, fees, deposits) are not exposed by
+    /// any tool this client knows. Log every tool IBKR added since, with its
+    /// input schema, so a new one can be wired without guessing its shape.
+    /// Best effort: a failure here must never block the sync.
+    async fn log_unknown_tools(&self) {
+        match self.mcp.list_tools().await {
+            Ok(tools) => {
+                for tool in tools {
+                    let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if KNOWN_MCP_TOOLS.contains(&name) {
+                        continue;
+                    }
+                    log::warn!(
+                        "[IBKR] Unknown MCP tool '{}': {} | input: {}",
+                        name,
+                        tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                        tool.get("inputSchema").cloned().unwrap_or_default()
+                    );
+                }
+            }
+            Err(e) => log::warn!("[IBKR] tools/list failed: {e}"),
+        }
+    }
+
     /// Portfolio allocations straight from IBKR's own classification, used in
     /// place of the local taxonomy join for this account.
     pub async fn allocations(
@@ -328,6 +366,8 @@ impl IbkrMcpClient {
         if let Some(cached) = self.trades_cache.lock().await.as_ref() {
             return Ok(cached.clone());
         }
+
+        self.log_unknown_tools().await;
 
         let mut windows: Vec<(&str, std::result::Result<IbkrTradesResponse, String>)> = Vec::new();
         for period in TRADE_PERIODS {
