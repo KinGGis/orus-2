@@ -444,7 +444,7 @@ fn map_trade(trade: &IbkrTrade) -> Option<AccountUniversalActivity> {
     });
 
     Some(AccountUniversalActivity {
-        id: Some(trade_id.clone()),
+        id: Some(activity_uuid(&trade_id)),
         symbol: Some(AccountUniversalActivitySymbol {
             symbol: Some(symbol.clone()),
             raw_symbol: Some(symbol),
@@ -469,6 +469,18 @@ fn map_trade(trade: &IbkrTrade) -> Option<AccountUniversalActivity> {
         source_record_id: Some(trade_id),
         ..Default::default()
     })
+}
+
+/// Activity ids are UUIDs in storage, but IBKR trade ids are not (they contain
+/// dots), so derive a stable UUID from the trade id; re-syncs hit the same row.
+fn activity_uuid(trade_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{IBKR_SOURCE_SYSTEM}:trade:{trade_id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
 }
 
 /// Compare an RFC 3339 trade instant against a `YYYY-MM-DD` bound.
@@ -736,6 +748,18 @@ mod tests {
             activity.symbol.unwrap().raw_symbol.as_deref(),
             Some("GM")
         );
+    }
+
+    #[test]
+    fn activity_id_is_a_stable_uuid_for_dotted_trade_ids() {
+        let a = map_trade(&trade("1234567.89", "BUY", "STK")).expect("mapped");
+        let b = map_trade(&trade("1234567.89", "BUY", "STK")).expect("mapped");
+        let c = map_trade(&trade("1234567.90", "BUY", "STK")).expect("mapped");
+        let id = a.id.expect("id");
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        assert_eq!(Some(id.clone()), b.id);
+        assert_ne!(Some(id), c.id);
+        assert_eq!(a.source_record_id.as_deref(), Some("1234567.89"));
     }
 
     #[test]
