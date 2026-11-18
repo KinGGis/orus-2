@@ -42,6 +42,17 @@ impl McpClient {
         extract_tool_payload(name, &result)
     }
 
+    /// List the tools the server currently exposes (`tools/list`).
+    pub async fn list_tools(&self) -> Result<Vec<Value>> {
+        self.ensure_session().await?;
+        let result = self.request("tools/list", json!({})).await?;
+        Ok(result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// Acquire an access token without performing any MCP call.
     ///
     /// Lets a caller tell an authorization failure apart from an MCP one;
