@@ -273,6 +273,8 @@ pub(crate) fn account_value_override(
 struct StatusResponse {
     connected: bool,
     client_registered: bool,
+    sync_running: bool,
+    last_sync: Option<SyncOutcome>,
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<StatusResponse>> {
@@ -285,10 +287,18 @@ async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<Status
         .get_secret(IBKR_REFRESH_TOKEN_KEY)?
         .is_some();
 
-    Ok(Json(StatusResponse {
-        connected,
-        client_registered,
-    }))
+    Ok(Json(StatusResponse::new(connected, client_registered)))
+}
+
+impl StatusResponse {
+    fn new(connected: bool, client_registered: bool) -> Self {
+        Self {
+            connected,
+            client_registered,
+            sync_running: IBKR_SYNC_RUNNING.load(std::sync::atomic::Ordering::SeqCst),
+            last_sync: IBKR_LAST_SYNC.lock().ok().and_then(|last| last.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,10 +437,7 @@ async fn handle_callback(
     let _ = state.secret_store.delete_secret(IBKR_AUTH_CLIENT_ID_KEY);
 
     info!("[IBKR] Authorization complete; refresh token stored");
-    Ok(Json(StatusResponse {
-        connected: true,
-        client_registered: true,
-    }))
+    Ok(Json(StatusResponse::new(true, true)))
 }
 
 /// Forget the IBKR grant. The OAuth client registration is kept so a
@@ -442,13 +449,13 @@ async fn disconnect(State(state): State<Arc<AppState>>) -> ApiResult<Json<Status
     let _ = state.secret_store.delete_secret(IBKR_REDIRECT_URI_KEY);
     let _ = state.secret_store.delete_secret(IBKR_AUTH_CLIENT_ID_KEY);
 
-    Ok(Json(StatusResponse {
-        connected: false,
-        client_registered: state
+    Ok(Json(StatusResponse::new(
+        false,
+        state
             .secret_store
             .get_secret(IBKR_CLIENT_ID_KEY)?
             .is_some(),
-    }))
+    )))
 }
 
 /// The MCP reports broker-side positions and balances exactly, but its trade
@@ -511,6 +518,42 @@ async fn ensure_holdings_tracking_mode(state: &AppState) -> ApiResult<bool> {
 static IBKR_SYNC_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Upper bound for a whole sync, so a stalled step cannot hold the lock forever.
+const IBKR_SYNC_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Outcome of the most recent sync, polled by the frontend.
+///
+/// The completion event travels over SSE, which the proxy in front of the
+/// server cuts after about thirty seconds; a sync lasting minutes would finish
+/// unannounced. Polling the status endpoint does not depend on that stream.
+static IBKR_LAST_SYNC: std::sync::Mutex<Option<SyncOutcome>> = std::sync::Mutex::new(None);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncOutcome {
+    finished_at: DateTime<Utc>,
+    success: bool,
+    message: String,
+}
+
+impl SyncOutcome {
+    fn new(success: bool, message: String) -> Self {
+        Self {
+            finished_at: Utc::now(),
+            success,
+            message,
+        }
+    }
+}
+
+struct SyncRunningGuard;
+
+impl Drop for SyncRunningGuard {
+    fn drop(&mut self) {
+        IBKR_SYNC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SyncStartedResponse {
@@ -547,10 +590,33 @@ async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncSta
     }
 
     tokio::spawn(async move {
-        if let Err(err) = run_ibkr_sync(state, client).await {
-            error!("[IBKR] Sync failed: {}", err);
+        // Released on every exit path, panics included: a flag left set would
+        // refuse every later sync until the server restarts.
+        let _running = SyncRunningGuard;
+        info!("[IBKR] Sync started");
+        let outcome = match timeout(IBKR_SYNC_TIMEOUT, run_ibkr_sync(state, client)).await {
+            Ok(Ok(result)) => {
+                info!("[IBKR] Sync finished: {}", result.message);
+                SyncOutcome::new(result.success, result.message)
+            }
+            Ok(Err(err)) => {
+                error!("[IBKR] Sync failed: {}", err);
+                SyncOutcome::new(false, err)
+            }
+            Err(_) => {
+                error!("[IBKR] Sync aborted after {:?}", IBKR_SYNC_TIMEOUT);
+                SyncOutcome::new(
+                    false,
+                    format!(
+                        "La synchronisation IBKR a dépassé {} minutes et a été interrompue.",
+                        IBKR_SYNC_TIMEOUT.as_secs() / 60
+                    ),
+                )
+            }
+        };
+        if let Ok(mut last) = IBKR_LAST_SYNC.lock() {
+            *last = Some(outcome);
         }
-        IBKR_SYNC_RUNNING.store(false, Ordering::SeqCst);
     });
 
     Ok(Json(SyncStartedResponse {

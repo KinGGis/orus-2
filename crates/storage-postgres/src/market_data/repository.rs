@@ -157,10 +157,31 @@ impl QuoteStore for MarketDataRepository {
                 .collect()
         };
 
-        let mut total_upserted = 0usize;
+        // A multi-row ON CONFLICT DO UPDATE rejects a statement that touches the
+        // same row twice, so keep only the last quote per conflict key.
+        let mut index_by_key: HashMap<(uuid::Uuid, NaiveDate, String), usize> = HashMap::new();
+        let mut unique_rows: Vec<QuoteDB> = Vec::with_capacity(db_rows.len());
         for row in db_rows {
+            let key = (row.asset_id, row.day, row.source.clone());
+            match index_by_key.get(&key) {
+                Some(&index) => unique_rows[index] = row,
+                None => {
+                    index_by_key.insert(key, unique_rows.len());
+                    unique_rows.push(row);
+                }
+            }
+        }
+
+        // One statement per row meant one network round trip per quote: years
+        // of daily bars took the better part of an hour against a remote
+        // database. 1,000 rows of 14 columns stay well under Postgres's
+        // 65,535 bind parameter limit.
+        const UPSERT_BATCH_SIZE: usize = 1_000;
+
+        let mut total_upserted = 0usize;
+        for batch in unique_rows.chunks(UPSERT_BATCH_SIZE) {
             total_upserted += diesel::insert_into(quotes_dsl::wf_quotes)
-                .values(&row)
+                .values(batch)
                 .on_conflict((quotes_dsl::asset_id, quotes_dsl::day, quotes_dsl::source))
                 .do_update()
                 .set((
