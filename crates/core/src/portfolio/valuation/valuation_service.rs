@@ -16,6 +16,38 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use super::DailyFxRateMap;
+use crate::accounts::AccountRepositoryTrait;
+use crate::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
+
+/// Sum the portfolios' own valuations into TOTAL on the days any of them is
+/// reported rather than computed.
+///
+/// Only the value is replaced. Net contribution stays as computed for TOTAL
+/// from the activities of every portfolio, in base currency at each flow's own
+/// rate, so returns keep treating deposits as flows. Days with no reported
+/// member are left untouched, preserving the computed series exactly. The rows
+/// stay `Calculated`: they are derived, and marking them reported would make
+/// the next recalculation replay them as if a broker had sent them.
+pub(crate) fn consolidate_with_members(
+    totals: &mut [DailyAccountValuation],
+    members: &[DailyAccountValuation],
+) {
+    let mut by_date: HashMap<NaiveDate, (Decimal, bool)> = HashMap::new();
+    for member in members {
+        let entry = by_date
+            .entry(member.valuation_date)
+            .or_insert((Decimal::ZERO, false));
+        entry.0 += member.total_value * member.fx_rate_to_base;
+        entry.1 |= member.source == ValuationSource::BrokerImported;
+    }
+
+    for total in totals.iter_mut() {
+        if let Some((value, true)) = by_date.get(&total.valuation_date).copied() {
+            total.total_value = value;
+            total.investment_market_value = value - total.cash_balance;
+        }
+    }
+}
 
 /// Controls the scope of a valuation history recalculation.
 #[derive(Clone, Debug)]
@@ -90,6 +122,7 @@ pub struct ValuationService {
     snapshot_service: Arc<dyn SnapshotServiceTrait>,
     quote_service: Arc<dyn QuoteServiceTrait>,
     fx_service: Arc<dyn FxServiceTrait>,
+    account_repository: Arc<dyn AccountRepositoryTrait>,
 }
 
 impl ValuationService {
@@ -99,6 +132,7 @@ impl ValuationService {
         snapshot_service: Arc<dyn SnapshotServiceTrait>,
         quote_service: Arc<dyn QuoteServiceTrait>,
         fx_service: Arc<dyn FxServiceTrait>,
+        account_repository: Arc<dyn AccountRepositoryTrait>,
     ) -> Self {
         Self {
             base_currency,
@@ -106,7 +140,39 @@ impl ValuationService {
             quote_service,
             fx_service,
             valuation_repository,
+            account_repository,
         }
+    }
+
+    /// Replace the TOTAL value with the sum of its portfolios on every day at
+    /// least one of them carries a reported valuation.
+    ///
+    /// TOTAL is otherwise valued from its own aggregated holdings, which never
+    /// sees the figures a broker or fund administrator reports for a single
+    /// portfolio, so the fund total kept showing the locally computed value of a
+    /// portfolio whose own page showed the reported one.
+    fn consolidate_reported_values(&self, totals: &mut [DailyAccountValuation]) -> CoreResult<()> {
+        let (Some(first), Some(last)) = (
+            totals.iter().map(|v| v.valuation_date).min(),
+            totals.iter().map(|v| v.valuation_date).max(),
+        ) else {
+            return Ok(());
+        };
+
+        let mut members = Vec::new();
+        for account in self.account_repository.list(None, Some(false), None)? {
+            if account.id == PORTFOLIO_TOTAL_ACCOUNT_ID {
+                continue;
+            }
+            members.extend(self.valuation_repository.get_historical_valuations(
+                &account.id,
+                Some(first),
+                Some(last),
+            )?);
+        }
+
+        consolidate_with_members(totals, &members);
+        Ok(())
     }
 
     async fn fetch_fx_rates_for_range(
@@ -196,6 +262,17 @@ impl ValuationServiceTrait for ValuationService {
         );
 
         let mut calculation_start_date: Option<NaiveDate> = None;
+
+        // Read before any deletion: a full recalculation wipes every row of the
+        // account, and these rows are the only copy of the figures the broker
+        // reported. Reading them afterwards silently dropped them all.
+        let broker_navs: HashMap<NaiveDate, Decimal> = self
+            .valuation_repository
+            .get_historical_valuations(account_id, None, None)?
+            .into_iter()
+            .filter(|v| v.source == ValuationSource::BrokerImported)
+            .map(|v| (v.valuation_date, v.total_value))
+            .collect();
 
         match &mode {
             ValuationRecalcMode::Full => {
@@ -408,15 +485,7 @@ impl ValuationServiceTrait for ValuationService {
             // NAV replaces that figure while cash, cost basis and net
             // contribution stay as computed from activities — those are
             // derived from the transaction history and remain trustworthy.
-            let broker_navs: HashMap<NaiveDate, Decimal> = self
-                .valuation_repository
-                .get_historical_valuations(account_id, None, None)?
-                .into_iter()
-                .filter(|v| v.source == ValuationSource::BrokerImported)
-                .map(|v| (v.valuation_date, v.total_value))
-                .collect();
-
-            let valuations_to_save: Vec<DailyAccountValuation> = newly_calculated_valuations
+            let mut valuations_to_save: Vec<DailyAccountValuation> = newly_calculated_valuations
                 .into_iter()
                 .map(|mut valuation| {
                     if let Some(nav) = broker_navs.get(&valuation.valuation_date) {
@@ -427,6 +496,10 @@ impl ValuationServiceTrait for ValuationService {
                     valuation
                 })
                 .collect();
+
+            if account_id == PORTFOLIO_TOTAL_ACCOUNT_ID {
+                self.consolidate_reported_values(&mut valuations_to_save)?;
+            }
 
             self.valuation_repository
                 .save_valuations(&valuations_to_save)
@@ -478,5 +551,59 @@ impl ValuationServiceTrait for ValuationService {
         );
         self.valuation_repository
             .get_valuations_on_date(account_ids, date)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn row(
+        account_id: &str,
+        day: u32,
+        total: Decimal,
+        fx: Decimal,
+        source: ValuationSource,
+    ) -> DailyAccountValuation {
+        DailyAccountValuation {
+            id: format!("{account_id}_{day}"),
+            account_id: account_id.to_string(),
+            valuation_date: NaiveDate::from_ymd_opt(2026, 11, day).unwrap(),
+            account_currency: "GBP".to_string(),
+            base_currency: "EUR".to_string(),
+            fx_rate_to_base: fx,
+            cash_balance: dec!(10),
+            investment_market_value: total - dec!(10),
+            total_value: total,
+            cost_basis: Decimal::ZERO,
+            net_contribution: dec!(500),
+            calculated_at: chrono::Utc::now(),
+            source,
+        }
+    }
+
+    #[test]
+    fn total_sums_members_in_base_currency_only_on_reported_days() {
+        use ValuationSource::{BrokerImported, Calculated};
+
+        let mut totals = vec![
+            row("TOTAL", 1, dec!(900), Decimal::ONE, Calculated),
+            row("TOTAL", 2, dec!(950), Decimal::ONE, Calculated),
+        ];
+        let members = vec![
+            row("ibkr", 1, dec!(100), dec!(1.2), Calculated),
+            row("pe", 1, dec!(300), Decimal::ONE, Calculated),
+            row("ibkr", 2, dec!(200), dec!(1.2), BrokerImported),
+            row("pe", 2, dec!(300), Decimal::ONE, Calculated),
+        ];
+
+        consolidate_with_members(&mut totals, &members);
+
+        assert_eq!(totals[0].total_value, dec!(900));
+        assert_eq!(totals[1].total_value, dec!(540));
+        assert_eq!(totals[1].investment_market_value, dec!(530));
+        assert_eq!(totals[1].net_contribution, dec!(500));
+        assert_eq!(totals[1].source, Calculated);
     }
 }
