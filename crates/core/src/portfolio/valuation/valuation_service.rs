@@ -35,7 +35,7 @@ const MAX_BROKER_NAV_CARRY_DAYS: i64 = 4;
 /// (a holiday). A trailing weekday is left computed: carried rows are persisted
 /// as reported, and filling it would let a stale NAV extend itself on every
 /// recalculation until the next sync.
-fn broker_nav_on(navs: &BTreeMap<NaiveDate, Decimal>, date: NaiveDate) -> Option<Decimal> {
+fn broker_nav_on<T: Copy>(navs: &BTreeMap<NaiveDate, T>, date: NaiveDate) -> Option<T> {
     if let Some(nav) = navs.get(&date) {
         return Some(*nav);
     }
@@ -53,7 +53,8 @@ fn broker_nav_on(navs: &BTreeMap<NaiveDate, Decimal>, date: NaiveDate) -> Option
 ///
 /// Only the value is replaced. Net contribution stays as computed for TOTAL
 /// from the activities of every portfolio, in base currency at each flow's own
-/// rate, so returns keep treating deposits as flows. Days with no reported
+/// rate, so returns keep treating deposits as flows; flows a broker reported
+/// without a matching activity are added on top. Days with no reported
 /// member are left untouched, preserving the computed series exactly. The rows
 /// stay `Calculated`: they are derived, and marking them reported would make
 /// the next recalculation replay them as if a broker had sent them.
@@ -70,12 +71,52 @@ pub(crate) fn consolidate_with_members(
         entry.1 |= member.source == ValuationSource::BrokerImported;
     }
 
+    let broker_flows = broker_reported_flows(members);
     for total in totals.iter_mut() {
         if let Some((value, true)) = by_date.get(&total.valuation_date).copied() {
             total.total_value = value;
             total.investment_market_value = value - total.cash_balance;
         }
+        if let Some((_, flows)) = broker_flows.range(..=total.valuation_date).next_back() {
+            total.net_contribution += *flows;
+        }
     }
+}
+
+/// Running total, in base currency, of the flows brokers reported beyond the
+/// activities TOTAL is computed from.
+///
+/// A reported portfolio's contribution moves only where its broker saw money
+/// come in or out that no activity records. Each move is converted at that
+/// day's rate. The level at a portfolio's first reported day is not counted: it
+/// carries over what activities already contributed.
+fn broker_reported_flows(members: &[DailyAccountValuation]) -> BTreeMap<NaiveDate, Decimal> {
+    let mut by_account: HashMap<&str, Vec<&DailyAccountValuation>> = HashMap::new();
+    for member in members
+        .iter()
+        .filter(|m| m.source == ValuationSource::BrokerImported)
+    {
+        by_account.entry(&member.account_id).or_default().push(member);
+    }
+
+    let mut flows: BTreeMap<NaiveDate, Decimal> = BTreeMap::new();
+    for rows in by_account.values_mut() {
+        rows.sort_by_key(|r| r.valuation_date);
+        for pair in rows.windows(2) {
+            let flow = pair[1].net_contribution - pair[0].net_contribution;
+            if !flow.is_zero() {
+                *flows.entry(pair[1].valuation_date).or_default() +=
+                    flow * pair[1].fx_rate_to_base;
+            }
+        }
+    }
+
+    let mut running = Decimal::ZERO;
+    for flow in flows.values_mut() {
+        running += *flow;
+        *flow = running;
+    }
+    flows
 }
 
 /// Controls the scope of a valuation history recalculation.
@@ -181,13 +222,12 @@ impl ValuationService {
     /// portfolio, so the fund total kept showing the locally computed value of a
     /// portfolio whose own page showed the reported one.
     fn consolidate_reported_values(&self, totals: &mut [DailyAccountValuation]) -> CoreResult<()> {
-        let (Some(first), Some(last)) = (
-            totals.iter().map(|v| v.valuation_date).min(),
-            totals.iter().map(|v| v.valuation_date).max(),
-        ) else {
+        let Some(last) = totals.iter().map(|v| v.valuation_date).max() else {
             return Ok(());
         };
 
+        // From the start, not `first`: broker flows are cumulative, so an
+        // incremental run needs every earlier reported day to total them.
         let mut members = Vec::new();
         for account in self.account_repository.list(None, Some(false), None)? {
             if account.id == PORTFOLIO_TOTAL_ACCOUNT_ID {
@@ -195,7 +235,7 @@ impl ValuationService {
             }
             members.extend(self.valuation_repository.get_historical_valuations(
                 &account.id,
-                Some(first),
+                None,
                 Some(last),
             )?);
         }
@@ -295,12 +335,12 @@ impl ValuationServiceTrait for ValuationService {
         // Read before any deletion: a full recalculation wipes every row of the
         // account, and these rows are the only copy of the figures the broker
         // reported. Reading them afterwards silently dropped them all.
-        let broker_navs: BTreeMap<NaiveDate, Decimal> = self
+        let broker_navs: BTreeMap<NaiveDate, (Decimal, Decimal)> = self
             .valuation_repository
             .get_historical_valuations(account_id, None, None)?
             .into_iter()
             .filter(|v| v.source == ValuationSource::BrokerImported)
-            .map(|v| (v.valuation_date, v.total_value))
+            .map(|v| (v.valuation_date, (v.total_value, v.net_contribution)))
             .collect();
 
         match &mode {
@@ -511,15 +551,19 @@ impl ValuationServiceTrait for ValuationService {
         if !newly_calculated_valuations.is_empty() {
             // IBKR-style brokers report their own net asset value. Only the
             // market value depends on quotes we may be missing, so the broker
-            // NAV replaces that figure while cash, cost basis and net
-            // contribution stay as computed from activities — those are
-            // derived from the transaction history and remain trustworthy.
+            // NAV replaces that figure while cash and cost basis stay as
+            // computed from activities. Net contribution comes from the broker
+            // too: its NAV includes deposits we hold no activity for, and
+            // leaving them out made every deposit count as performance.
             let mut valuations_to_save: Vec<DailyAccountValuation> = newly_calculated_valuations
                 .into_iter()
                 .map(|mut valuation| {
-                    if let Some(nav) = broker_nav_on(&broker_navs, valuation.valuation_date) {
+                    if let Some((nav, contribution)) =
+                        broker_nav_on(&broker_navs, valuation.valuation_date)
+                    {
                         valuation.investment_market_value = nav - valuation.cash_balance;
                         valuation.total_value = nav;
+                        valuation.net_contribution = contribution;
                         valuation.source = ValuationSource::BrokerImported;
                     }
                     valuation
@@ -634,6 +678,32 @@ mod tests {
         assert_eq!(totals[1].investment_market_value, dec!(530));
         assert_eq!(totals[1].net_contribution, dec!(500));
         assert_eq!(totals[1].source, Calculated);
+    }
+
+    #[test]
+    fn total_adds_broker_flows_at_each_days_rate() {
+        use ValuationSource::{BrokerImported, Calculated};
+
+        let mut totals = vec![
+            row("TOTAL", 2, dec!(900), Decimal::ONE, Calculated),
+            row("TOTAL", 4, dec!(900), Decimal::ONE, Calculated),
+        ];
+        let with_contribution = |day, contribution, fx| {
+            let mut r = row("ibkr", day, dec!(100), fx, BrokerImported);
+            r.net_contribution = contribution;
+            r
+        };
+        let members = vec![
+            with_contribution(1, dec!(0), dec!(1.2)),
+            with_contribution(3, dec!(100), dec!(1.1)),
+            with_contribution(4, dec!(100), dec!(1.5)),
+        ];
+
+        consolidate_with_members(&mut totals, &members);
+
+        // Opening level is not a flow; the deposit on day 3 counts at 1.1.
+        assert_eq!(totals[0].net_contribution, dec!(500));
+        assert_eq!(totals[1].net_contribution, dec!(610));
     }
 
     #[test]

@@ -886,10 +886,27 @@ async fn import_nav_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> Co
         .unwrap_or_else(|| account.currency.clone());
     let now = Utc::now();
 
+    // Net contribution is the running total of the flows IBKR's returns imply.
+    // The window is one rolling year, so it continues from what is already
+    // stored at its first day; restarting at zero would turn every flow that
+    // slid out of the window into a fake withdrawal.
+    let first_date = history.points.first().map(|(d, _)| *d).unwrap();
+    let opening_contribution = state
+        .valuation_repository
+        .get_historical_valuations(&account.id, Some(first_date), Some(first_date))?
+        .first()
+        .map(|v| v.net_contribution)
+        .unwrap_or(Decimal::ZERO);
+    let mut flows = history.flows.iter().peekable();
+    let mut contribution = opening_contribution;
+
     let valuations: Vec<DailyAccountValuation> = history
         .points
         .iter()
         .map(|(date, nav)| {
+            while let Some((_, flow)) = flows.next_if(|(flow_date, _)| flow_date <= date) {
+                contribution += *flow;
+            }
             let fx_rate_to_base = if currency == base_currency {
                 Decimal::ONE
             } else {
@@ -910,7 +927,7 @@ async fn import_nav_history(state: &Arc<AppState>, client: &IbkrMcpClient) -> Co
                 investment_market_value: *nav,
                 total_value: *nav,
                 cost_basis: Decimal::ZERO,
-                net_contribution: Decimal::ZERO,
+                net_contribution: contribution,
                 calculated_at: now,
                 source: ValuationSource::BrokerImported,
             }
