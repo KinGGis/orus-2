@@ -13,6 +13,7 @@ import { Separator } from "@wealthfolio/ui/components/ui/separator";
 import { useToast } from "@wealthfolio/ui/components/ui/use-toast";
 import { formatAmount } from "@wealthfolio/ui";
 import { useCallback, useEffect, useState } from "react";
+import { runIbkrSync } from "@/lib/broker-sync";
 import { SettingsHeader } from "../settings-header";
 
 interface IbkrStatus {
@@ -145,18 +146,16 @@ export default function IbkrSettingsPage() {
 
   const handleSync = async () => {
     setIsSyncing(true);
+    toast({
+      title: "Synchronisation lancée",
+      description:
+        "La synchronisation IBKR peut prendre quelques minutes. Le résultat s'affichera à la fin.",
+    });
     try {
-      const response = await fetch("/api/v1/dfc/ibkr/sync", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw new Error(await describeFailure(response));
-      const result = await response.json();
+      const message = await runIbkrSync();
       toast({
-        title: "Synchronisation lancée",
-        description:
-          result.message ??
-          "Synchronisation IBKR lancée. Le résultat s'affichera à la fin.",
+        title: "Synchronisation IBKR terminée",
+        description: message,
       });
     } catch (error) {
       console.error("Error syncing IBKR:", error);
