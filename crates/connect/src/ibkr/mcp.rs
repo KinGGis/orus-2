@@ -12,7 +12,9 @@ use tokio::sync::Mutex;
 
 use wealthfolio_core::errors::{Error, Result};
 
-use super::oauth::{describe_transport_error, IbkrTokenManager, IBKR_MCP_ENDPOINT};
+use super::oauth::{
+    describe_transport_error, send_with_retry, IbkrTokenManager, IBKR_MCP_ENDPOINT,
+};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -162,7 +164,7 @@ impl McpClient {
             request = request.header("Mcp-Session-Id", session);
         }
 
-        let response = request.json(body).send().await.map_err(|e| {
+        let response = send_with_retry(request.json(body)).await.map_err(|e| {
             SendError::Other(Error::Unexpected(format!(
                 "IBKR MCP request failed: {}",
                 describe_transport_error(&e)
