@@ -41,8 +41,13 @@ impl DebtFlowType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DebtFlowStatus {
+    /// Scheduled, not booked yet.
     Expected,
-    Received,
+    /// Due and booked from the schedule; counted in the valuation until the
+    /// platform statement confirms it.
+    Estimated,
+    /// Matched with a real activity.
+    Confirmed,
     Partial,
     Late,
     Waived,
@@ -52,7 +57,8 @@ impl DebtFlowStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Expected => "EXPECTED",
-            Self::Received => "RECEIVED",
+            Self::Estimated => "ESTIMATED",
+            Self::Confirmed => "CONFIRMED",
             Self::Partial => "PARTIAL",
             Self::Late => "LATE",
             Self::Waived => "WAIVED",
@@ -62,7 +68,8 @@ impl DebtFlowStatus {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "EXPECTED" => Ok(Self::Expected),
-            "RECEIVED" => Ok(Self::Received),
+            "ESTIMATED" => Ok(Self::Estimated),
+            "CONFIRMED" => Ok(Self::Confirmed),
             "PARTIAL" => Ok(Self::Partial),
             "LATE" => Ok(Self::Late),
             "WAIVED" => Ok(Self::Waived),

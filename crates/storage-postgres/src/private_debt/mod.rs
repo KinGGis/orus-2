@@ -402,7 +402,7 @@ mod tests {
             .settle_flow(
                 &november.id,
                 DebtFlowSettlement {
-                    status: DebtFlowStatus::Received,
+                    status: DebtFlowStatus::Confirmed,
                     received_amount: Some(dec!(1.80)),
                     received_date: Some(date("2026-11-18")),
                     activity_id: None,
@@ -411,7 +411,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(settled.status, DebtFlowStatus::Received);
+        assert_eq!(settled.status, DebtFlowStatus::Confirmed);
         assert_eq!(settled.received_amount, Some(dec!(1.8)));
 
         // New terms: every amount changes, and a January flow appears.
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(
             amounts,
             vec![
-                (date("2026-11-17"), DebtFlowStatus::Received, dec!(1.83)),
+                (date("2026-11-17"), DebtFlowStatus::Confirmed, dec!(1.83)),
                 (date("2026-12-17"), DebtFlowStatus::Expected, dec!(2)),
                 (date("2027-01-17"), DebtFlowStatus::Expected, dec!(2)),
             ]
