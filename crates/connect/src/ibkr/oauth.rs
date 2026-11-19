@@ -61,6 +61,37 @@ pub fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+const CONNECT_ATTEMPTS: u32 = 3;
+
+/// Send a request, retrying failures to establish the connection.
+///
+/// The path from the hosted server to IBKR's edge intermittently drops
+/// handshakes (timeouts, TLS EOF) while IBKR itself is up. Only connect
+/// failures are retried: nothing reached IBKR, so a retry cannot replay a
+/// refresh that already rotated the token.
+pub async fn send_with_retry(
+    request: reqwest::RequestBuilder,
+) -> reqwest::Result<reqwest::Response> {
+    let mut delay = std::time::Duration::from_millis(500);
+    for attempt in 1..CONNECT_ATTEMPTS {
+        let Some(try_request) = request.try_clone() else {
+            break;
+        };
+        match try_request.send().await {
+            Err(e) if e.is_connect() => {
+                log::warn!(
+                    "[IBKR] Connection attempt {attempt}/{CONNECT_ATTEMPTS} failed, retrying: {}",
+                    describe_transport_error(&e)
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            other => return other,
+        }
+    }
+    request.send().await
+}
+
 /// Render a transport failure with the cause `reqwest` hides.
 ///
 /// A `reqwest::Error` displays as `error sending request for url (…)`, which
@@ -162,10 +193,7 @@ pub async fn register_client(
         "scope": IBKR_SCOPE,
     });
 
-    let response = http
-        .post(IBKR_REGISTER_URL)
-        .json(&body)
-        .send()
+    let response = send_with_retry(http.post(IBKR_REGISTER_URL).json(&body))
         .await
         .map_err(|e| {
             Error::Unexpected(format!(
@@ -353,11 +381,7 @@ impl IbkrTokenManager {
     }
 
     async fn post_token(&self, params: &[(&str, &str)]) -> Result<TokenResponse> {
-        let response = self
-            .http
-            .post(IBKR_TOKEN_URL)
-            .form(params)
-            .send()
+        let response = send_with_retry(self.http.post(IBKR_TOKEN_URL).form(params))
             .await
             .map_err(|e| {
                 Error::Unexpected(format!(
@@ -464,5 +488,59 @@ mod tests {
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback"));
         assert!(url.contains("resource=https%3A%2F%2Fapi.ibkr.com%2Fv1%2Fapi%2Fmcp"));
+    }
+
+    #[tokio::test]
+    async fn retries_a_connection_that_was_refused() {
+        use std::io::{Read, Write};
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        // The first attempt hits a closed port; the server comes up during
+        // the backoff.
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+
+        let request = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/"));
+        let response = send_with_retry(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_once_the_request_was_sent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        // Accept and hang up without answering, for longer than the backoff.
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while std::time::Instant::now() < deadline {
+                if let Ok((stream, _)) = listener.accept() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    drop(stream);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+
+        let request = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/"));
+        assert!(send_with_retry(request).await.is_err());
+        server.join().unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 }
