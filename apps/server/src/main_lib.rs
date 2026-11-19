@@ -299,6 +299,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
                 snapshot_service.clone(),
                 quote_service.clone(),
                 fx_service.clone(),
+                account_repo.clone(),
             ),
         );
         let net_worth_service: Arc<dyn NetWorthServiceTrait + Send + Sync> = Arc::new(
@@ -655,6 +656,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         snapshot_service.clone(),
         quote_service.clone(),
         fx_service.clone(),
+        account_repo.clone(),
     ));
 
     let net_worth_service: Arc<dyn NetWorthServiceTrait + Send + Sync> =

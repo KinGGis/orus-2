@@ -207,6 +207,7 @@ pub async fn initialize_context(
         snapshot_service.clone(),
         quote_service.clone(),
         fx_service.clone(),
+        account_repository.clone(),
     ));
 
     let performance_service = Arc::new(PerformanceService::new_with_timezone(

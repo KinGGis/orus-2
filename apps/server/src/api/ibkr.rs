@@ -592,6 +592,14 @@ async fn run_ibkr_sync(state: Arc<AppState>, client: IbkrMcpClient) -> Result<Sy
         warn!("[IBKR] Price history import skipped: {}", err);
     }
 
+    // Record what the broker reported today. Positions, trades and quotes are
+    // already persisted by the orchestrator; these are the figures IBKR derives
+    // itself, which were previously read live and never kept, leaving no record
+    // of what the custodian reported on any past day.
+    if let Err(err) = capture_broker_snapshots(&state, &client).await {
+        warn!("[IBKR] Broker snapshot capture skipped: {}", err);
+    }
+
     // The MCP publishes IBKR's own daily net asset value. It is the figure the
     // broker itself reports, so it replaces the locally computed market value
     // whenever we have it — that is what repairs the days where a European
@@ -599,14 +607,6 @@ async fn run_ibkr_sync(state: Arc<AppState>, client: IbkrMcpClient) -> Result<Sy
     // sync: positions and activities are already imported at this point.
     if let Err(err) = import_nav_history(&state, &client).await {
         warn!("[IBKR] NAV history import skipped: {}", err);
-    }
-
-    // Record what the broker reported today. Positions, trades and quotes are
-    // already persisted by the orchestrator; these are the figures IBKR derives
-    // itself, which were previously read live and never kept, leaving no record
-    // of what the custodian reported on any past day.
-    if let Err(err) = capture_broker_snapshots(&state, &client).await {
-        warn!("[IBKR] Broker snapshot capture skipped: {}", err);
     }
 
     Ok(result)
@@ -626,6 +626,7 @@ async fn capture_broker_snapshots(state: &AppState, client: &IbkrMcpClient) -> C
         .iter()
         .find(|acc| acc.provider_account_id.as_deref() == Some(IBKR_ACCOUNT_ID))
     else {
+        warn!("[IBKR] Broker snapshot capture skipped: no active IBKR account");
         return Ok(());
     };
 
@@ -634,8 +635,9 @@ async fn capture_broker_snapshots(state: &AppState, client: &IbkrMcpClient) -> C
     match client.allocation_payload().await {
         Ok(payload) => match allocation_snapshot(&account.id, as_of, payload) {
             Ok(snapshot) => {
-                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
-                    warn!("[IBKR] Allocation capture not stored: {err}");
+                match state.broker_snapshot_repository.upsert(snapshot).await {
+                    Ok(()) => info!("[IBKR] Allocation captured for {as_of}"),
+                    Err(err) => warn!("[IBKR] Allocation capture not stored: {err}"),
                 }
             }
             Err(err) => warn!("[IBKR] Allocation payload not captured: {err}"),
@@ -646,8 +648,9 @@ async fn capture_broker_snapshots(state: &AppState, client: &IbkrMcpClient) -> C
     match client.account_summary_payload().await {
         Ok(payload) => match account_summary_snapshot(&account.id, as_of, payload) {
             Ok(snapshot) => {
-                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
-                    warn!("[IBKR] Account summary capture not stored: {err}");
+                match state.broker_snapshot_repository.upsert(snapshot).await {
+                    Ok(()) => info!("[IBKR] Account summary captured for {as_of}"),
+                    Err(err) => warn!("[IBKR] Account summary capture not stored: {err}"),
                 }
             }
             Err(err) => warn!("[IBKR] Account summary payload not captured: {err}"),
@@ -658,8 +661,9 @@ async fn capture_broker_snapshots(state: &AppState, client: &IbkrMcpClient) -> C
     match client.performance_payload().await {
         Ok(payload) => match performance_snapshot(&account.id, as_of, payload) {
             Ok(snapshot) => {
-                if let Err(err) = state.broker_snapshot_repository.upsert(snapshot).await {
-                    warn!("[IBKR] Performance capture not stored: {err}");
+                match state.broker_snapshot_repository.upsert(snapshot).await {
+                    Ok(()) => info!("[IBKR] Performance captured for {as_of}"),
+                    Err(err) => warn!("[IBKR] Performance capture not stored: {err}"),
                 }
             }
             Err(err) => warn!("[IBKR] Performance payload not captured: {err}"),
