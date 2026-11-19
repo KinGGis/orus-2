@@ -8,16 +8,45 @@ use crate::portfolio::valuation::ValuationRepositoryTrait;
 use crate::quotes::{DataSource, QuoteServiceTrait};
 use crate::utils::time_utils;
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate, Weekday};
 use rust_decimal::Decimal;
 use log::{debug, error, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use super::DailyFxRateMap;
 use crate::accounts::AccountRepositoryTrait;
 use crate::constants::PORTFOLIO_TOTAL_ACCOUNT_ID;
+
+/// Longest run of calendar days a reported NAV is carried over (a Thursday
+/// close through an Easter Monday).
+const MAX_BROKER_NAV_CARRY_DAYS: i64 = 4;
+
+/// The broker NAV that applies on `date`.
+///
+/// Brokers report on trading days only. Falling back to the computed figure in
+/// between made every weekend drop to whatever local quotes could price, which
+/// showed up as weekly crashes in the return series. The market is closed on
+/// those days, so the last reported NAV still holds — the same convention the
+/// broker applies itself.
+///
+/// A day is filled only when it is a weekend or lies between two reported days
+/// (a holiday). A trailing weekday is left computed: carried rows are persisted
+/// as reported, and filling it would let a stale NAV extend itself on every
+/// recalculation until the next sync.
+fn broker_nav_on(navs: &BTreeMap<NaiveDate, Decimal>, date: NaiveDate) -> Option<Decimal> {
+    if let Some(nav) = navs.get(&date) {
+        return Some(*nav);
+    }
+    let (previous_date, previous_nav) = navs.range(..date).next_back()?;
+    if (date - *previous_date).num_days() > MAX_BROKER_NAV_CARRY_DAYS {
+        return None;
+    }
+    let weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
+    let between_reports = navs.range(date..).next().is_some();
+    (weekend || between_reports).then_some(*previous_nav)
+}
 
 /// Sum the portfolios' own valuations into TOTAL on the days any of them is
 /// reported rather than computed.
@@ -266,7 +295,7 @@ impl ValuationServiceTrait for ValuationService {
         // Read before any deletion: a full recalculation wipes every row of the
         // account, and these rows are the only copy of the figures the broker
         // reported. Reading them afterwards silently dropped them all.
-        let broker_navs: HashMap<NaiveDate, Decimal> = self
+        let broker_navs: BTreeMap<NaiveDate, Decimal> = self
             .valuation_repository
             .get_historical_valuations(account_id, None, None)?
             .into_iter()
@@ -488,9 +517,9 @@ impl ValuationServiceTrait for ValuationService {
             let mut valuations_to_save: Vec<DailyAccountValuation> = newly_calculated_valuations
                 .into_iter()
                 .map(|mut valuation| {
-                    if let Some(nav) = broker_navs.get(&valuation.valuation_date) {
-                        valuation.investment_market_value = *nav - valuation.cash_balance;
-                        valuation.total_value = *nav;
+                    if let Some(nav) = broker_nav_on(&broker_navs, valuation.valuation_date) {
+                        valuation.investment_market_value = nav - valuation.cash_balance;
+                        valuation.total_value = nav;
                         valuation.source = ValuationSource::BrokerImported;
                     }
                     valuation
@@ -605,5 +634,21 @@ mod tests {
         assert_eq!(totals[1].investment_market_value, dec!(530));
         assert_eq!(totals[1].net_contribution, dec!(500));
         assert_eq!(totals[1].source, Calculated);
+    }
+
+    #[test]
+    fn broker_nav_is_carried_over_weekends_and_holidays_only() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 8, day).unwrap();
+        // Fri 21, Mon 24 missing (holiday), Tue 25, then nothing after Fri 28.
+        let navs = BTreeMap::from([(d(21), dec!(100)), (d(25), dec!(110)), (d(28), dec!(120))]);
+
+        assert_eq!(broker_nav_on(&navs, d(21)), Some(dec!(100)));
+        assert_eq!(broker_nav_on(&navs, d(22)), Some(dec!(100)));
+        assert_eq!(broker_nav_on(&navs, d(24)), Some(dec!(100)));
+        assert_eq!(broker_nav_on(&navs, d(29)), Some(dec!(120)));
+        assert_eq!(broker_nav_on(&navs, d(30)), Some(dec!(120)));
+        // Trailing weekday after the last report stays computed.
+        assert_eq!(broker_nav_on(&navs, d(31)), None);
+        assert_eq!(broker_nav_on(&navs, d(20)), None);
     }
 }
