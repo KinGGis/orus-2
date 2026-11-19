@@ -62,6 +62,59 @@ pub struct IbkrNavHistory {
     pub currency: Option<String>,
     /// Ascending by date.
     pub points: Vec<(NaiveDate, Decimal)>,
+    /// External cash flows (deposits, withdrawals, transfers) implied by the
+    /// series, by date, in the same currency. Ascending, non-zero only.
+    pub flows: Vec<(NaiveDate, Decimal)>,
+}
+
+/// External flows implied by IBKR's own return series.
+///
+/// IBKR's cumulative return (`cps`) is time-weighted, so it ignores deposits
+/// and withdrawals while the NAV includes them. Whatever part of a day's NAV
+/// change the return does not explain is money moved in or out:
+/// `flow = nav − prev_nav × (1 + cps) / (1 + prev_cps)`. Without this, every
+/// deposit showed up as performance.
+fn implied_flows(account: &IbkrPerformanceAccount) -> Vec<(NaiveDate, Decimal)> {
+    let Some(period) = account
+        .periods
+        .as_ref()
+        .and_then(|periods| {
+            periods
+                .values()
+                .filter(|p| p.cps.is_some() && p.nav.is_some())
+                .max_by_key(|p| p.dates.as_ref().map_or(0, Vec::len))
+        })
+    else {
+        return Vec::new();
+    };
+    let (Some(dates), Some(navs), Some(cps)) = (&period.dates, &period.nav, &period.cps) else {
+        return Vec::new();
+    };
+
+    let mut points: Vec<(NaiveDate, f64, f64)> = dates
+        .iter()
+        .zip(navs.iter())
+        .zip(cps.iter())
+        .filter_map(|((raw_date, nav), cps)| {
+            let date = NaiveDate::parse_from_str(raw_date, "%Y%m%d").ok()?;
+            (nav.is_finite() && cps.is_finite()).then_some((date, *nav, *cps))
+        })
+        .collect();
+    points.sort_by_key(|(date, _, _)| *date);
+    points.dedup_by_key(|(date, _, _)| *date);
+
+    points
+        .windows(2)
+        .filter_map(|pair| {
+            let ((_, prev_nav, prev_cps), (date, nav, cps)) = (pair[0], pair[1]);
+            if 1.0 + prev_cps <= 0.0 {
+                return None;
+            }
+            let flow = nav - prev_nav * (1.0 + cps) / (1.0 + prev_cps);
+            let flow = Decimal::from_f64_retain(flow)?.round_dp(2);
+            (!flow.is_zero()).then_some((date, flow))
+        })
+        .collect()
 }
 
 /// Picks the widest usable NAV series across IBKR's performance windows.
@@ -316,6 +369,7 @@ impl IbkrMcpClient {
         Ok(IbkrNavHistory {
             currency: account.base_currency.clone(),
             points: longest_nav_series(&account),
+            flows: implied_flows(&account),
         })
     }
 
@@ -935,6 +989,22 @@ mod tests {
                 (NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(), dec!(9)),
                 (NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(), dec!(11)),
             ]
+        );
+    }
+
+    #[test]
+    fn implied_flows_isolate_deposits_from_returns() {
+        let mut account = perf_account(vec![(
+            "1Y",
+            vec!["20261023", "20261026", "20261027"],
+            vec![1000.0, 1400.0, 1414.0],
+        )]);
+        account.periods.as_mut().unwrap().get_mut("1Y").unwrap().cps =
+            Some(vec![0.0, 0.0, 0.01]);
+
+        assert_eq!(
+            implied_flows(&account),
+            vec![(NaiveDate::from_ymd_opt(2026, 10, 26).unwrap(), dec!(400))]
         );
     }
 
