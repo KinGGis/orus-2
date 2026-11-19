@@ -171,7 +171,8 @@ pub struct BondSpec {
     pub pik_rate: Option<Decimal>,
     /// "BULLET" (default), "LINEAR", "ANNUITY" or "CUSTOM".
     pub amortization_type: Option<String>,
-    /// Comma-separated "YYYY-MM-DD:amount" principal repayments, for CUSTOM amortisation.
+    /// Comma-separated "YYYY-MM-DD:fraction" principal repayments for CUSTOM
+    /// amortisation, each a fraction of the initial principal (0.25 = 25 %).
     pub amortization_schedule: Option<String>,
     /// How the position is marked: "PAR", "AMORTIZED_COST", "YTM" or "MANUAL".
     pub valuation_method: Option<String>,
