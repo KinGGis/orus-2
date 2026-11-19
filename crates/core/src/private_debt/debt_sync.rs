@@ -8,10 +8,13 @@
 //! 2. each flow falling due is reconciled with a real activity of the same kind
 //!    (INTEREST for interest, SELL for principal) dated within
 //!    [`MATCH_WINDOW_DAYS`] of it;
-//! 3. a due flow with no real counterpart gets a generated activity, which a
-//!    real one (e.g. imported later from the platform statement) replaces as
-//!    soon as it is recorded. PIK interest is booked as INTEREST reinvested
-//!    through a BUY of the same amount.
+//! 3. a due flow with no real counterpart yet is booked as an ESTIMATED
+//!    generated activity, counted in the valuation until the monthly platform
+//!    statement is imported: a real activity then replaces it (CONFIRMED), and
+//!    if the statement covers the flow's date without paying it, the estimate
+//!    is removed and the flow turns LATE. Future flows stay projections in the
+//!    schedule. PIK interest is booked as INTEREST reinvested through a BUY of
+//!    the same amount.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -77,6 +80,8 @@ pub async fn sync_private_debt(
             .map(|fixing| fixing.rate)
     };
 
+    let real = |a: &&Activity| a.is_posted() && !is_generated(a.idempotency_key.as_deref());
+
     for (asset, spec) in &loans {
         let mut accounts: Vec<&str> = activities
             .iter()
@@ -118,8 +123,15 @@ pub async fn sync_private_debt(
             let stored = schedules.list_flows(account_id, &asset.id)?;
             let observed: Vec<ObservedActivity> =
                 held.iter().map(|a| ObservedActivity::from(*a)).collect();
+            let statement = statement_coverage(
+                activities
+                    .iter()
+                    .filter(|a| a.account_id == account_id)
+                    .filter(real)
+                    .map(|a| a.effective_date()),
+            );
 
-            for action in plan_reconciliation(&stored, &observed, today) {
+            for action in plan_reconciliation(&stored, &observed, statement, today) {
                 let result = apply(
                     action,
                     asset,
@@ -143,6 +155,15 @@ pub async fn sync_private_debt(
 
     info!("private_debt: {:?}", summary);
     Ok(summary)
+}
+
+/// Period the imported statements cover: from the first to the last real
+/// activity booked in the account.
+fn statement_coverage(dates: impl Iterator<Item = NaiveDate>) -> Option<(NaiveDate, NaiveDate)> {
+    dates.fold(None, |range, d| match range {
+        None => Some((d, d)),
+        Some((from, to)) => Some((from.min(d), to.max(d))),
+    })
 }
 
 /// Principal held and accrual start, from the real purchases of the loan.
@@ -233,7 +254,7 @@ async fn apply(
                 summary.activities_created += 1;
             }
             schedules
-                .settle_flow(&flow.id, auto_settlement(&flow, created.id))
+                .settle_flow(&flow.id, estimated_settlement(&flow, created.id))
                 .await?;
         }
     }
@@ -290,14 +311,17 @@ pub(crate) enum ReconcileAction {
 ///
 /// - Linked to a real activity: final, nothing to do.
 /// - A real activity of the matching kind, dated within the window and not
-///   claimed by another flow: settles it (RECEIVED, or PARTIAL when short),
-///   superseding any generated activity.
-/// - Otherwise an EXPECTED flow gets a generated activity, or is linked to the
-///   one already generated for it. A flow whose generated activity was deleted
-///   by the user turns LATE and is not generated again.
+///   claimed by another flow: CONFIRMED (PARTIAL when short), superseding the
+///   estimate.
+/// - Otherwise, once the imported statement covers the flow's date (beyond the
+///   window), the flow was not paid: LATE, and its estimate is removed.
+/// - Otherwise an EXPECTED flow is booked as ESTIMATED (generated activity, or
+///   the one already generated for it). A flow whose activity was deleted by
+///   the user turns LATE and is not generated again.
 pub(crate) fn plan_reconciliation(
     flows: &[DebtScheduleFlow],
     activities: &[ObservedActivity],
+    statement: Option<(NaiveDate, NaiveDate)>,
     today: NaiveDate,
 ) -> Vec<ReconcileAction> {
     let find = |id: &str| activities.iter().find(|a| a.id == id);
@@ -335,7 +359,7 @@ pub(crate) fn plan_reconciliation(
             let status = if real.amount + Decimal::new(1, 2) < flow.expected_amount {
                 DebtFlowStatus::Partial
             } else {
-                DebtFlowStatus::Received
+                DebtFlowStatus::Confirmed
             };
             actions.push(ReconcileAction::Settle {
                 flow_id: flow.id.clone(),
@@ -350,37 +374,47 @@ pub(crate) fn plan_reconciliation(
             });
             continue;
         }
-        if current.is_some() {
+        let late = |delete_activity: Option<String>| ReconcileAction::Settle {
+            flow_id: flow.id.clone(),
+            settlement: DebtFlowSettlement {
+                status: DebtFlowStatus::Late,
+                received_amount: None,
+                received_date: None,
+                activity_id: None,
+                notes: flow.notes.clone(),
+            },
+            delete_activity,
+        };
+        let unpaid = flow.flow_type != DebtFlowType::InterestPik
+            && statement.is_some_and(|(from, to)| {
+                from <= flow.flow_date && (to - flow.flow_date).num_days() > MATCH_WINDOW_DAYS
+            });
+
+        if let Some(estimate) = current {
+            if unpaid {
+                actions.push(late(Some(estimate.id.clone())));
+            }
             continue;
         }
 
         match flow.status {
             DebtFlowStatus::Expected => {
                 let key = generated_key(flow);
-                match activities
+                let existing = activities
                     .iter()
-                    .find(|a| a.idempotency_key.as_deref() == Some(key.as_str()))
-                {
+                    .find(|a| a.idempotency_key.as_deref() == Some(key.as_str()));
+                match existing {
+                    _ if unpaid => actions.push(late(existing.map(|a| a.id.clone()))),
                     Some(existing) => actions.push(ReconcileAction::Settle {
                         flow_id: flow.id.clone(),
-                        settlement: auto_settlement(flow, existing.id.clone()),
+                        settlement: estimated_settlement(flow, existing.id.clone()),
                         delete_activity: None,
                     }),
                     None => actions.push(ReconcileAction::Generate(flow.clone())),
                 }
             }
-            DebtFlowStatus::Received | DebtFlowStatus::Partial => {
-                actions.push(ReconcileAction::Settle {
-                    flow_id: flow.id.clone(),
-                    settlement: DebtFlowSettlement {
-                        status: DebtFlowStatus::Late,
-                        received_amount: None,
-                        received_date: None,
-                        activity_id: None,
-                        notes: flow.notes.clone(),
-                    },
-                    delete_activity: None,
-                })
+            DebtFlowStatus::Estimated | DebtFlowStatus::Confirmed | DebtFlowStatus::Partial => {
+                actions.push(late(None))
             }
             DebtFlowStatus::Late | DebtFlowStatus::Waived => {}
         }
@@ -411,9 +445,9 @@ fn is_generated(key: Option<&str>) -> bool {
     key.is_some_and(|k| k.starts_with(GENERATED_KEY_PREFIX))
 }
 
-fn auto_settlement(flow: &DebtScheduleFlow, activity_id: String) -> DebtFlowSettlement {
+fn estimated_settlement(flow: &DebtScheduleFlow, activity_id: String) -> DebtFlowSettlement {
     DebtFlowSettlement {
-        status: DebtFlowStatus::Received,
+        status: DebtFlowStatus::Estimated,
         received_amount: Some(flow.expected_amount),
         received_date: Some(flow.flow_date),
         activity_id: Some(activity_id),
@@ -488,7 +522,7 @@ mod tests {
             activity("a3", ACTIVITY_TYPE_SELL, "2026-10-18", dec!(150)),
         ];
 
-        let actions = plan_reconciliation(&flows, &activities, date(TODAY));
+        let actions = plan_reconciliation(&flows, &activities, None, date(TODAY));
 
         let settled: Vec<_> = actions
             .iter()
@@ -509,8 +543,8 @@ mod tests {
             settled,
             vec![
                 ("f1", "a1".to_string(), DebtFlowStatus::Partial),
-                ("f2", "a2".to_string(), DebtFlowStatus::Received),
-                ("f3", "a3".to_string(), DebtFlowStatus::Received),
+                ("f2", "a2".to_string(), DebtFlowStatus::Confirmed),
+                ("f3", "a3".to_string(), DebtFlowStatus::Confirmed),
             ]
         );
     }
@@ -518,11 +552,12 @@ mod tests {
     #[test]
     fn missing_flows_are_generated_once() {
         let due = flow("f1", "2026-11-01", DebtFlowType::InterestCash, dec!(1.83));
-        let actions = plan_reconciliation(&[due.clone()], &[], date(TODAY));
+        let actions = plan_reconciliation(&[due.clone()], &[], None, date(TODAY));
         assert_eq!(actions, vec![ReconcileAction::Generate(due.clone())]);
 
         // Already generated (e.g. settlement failed last run): link, don't duplicate.
-        let actions = plan_reconciliation(&[due.clone()], &[generated("g1", &due)], date(TODAY));
+        let actions =
+            plan_reconciliation(&[due.clone()], &[generated("g1", &due)], None, date(TODAY));
         assert!(matches!(
             &actions[..],
             [ReconcileAction::Settle { settlement, delete_activity: None, .. }]
@@ -531,22 +566,24 @@ mod tests {
 
         // Linked: nothing left to do.
         let mut linked = due.clone();
-        linked.status = DebtFlowStatus::Received;
+        linked.status = DebtFlowStatus::Estimated;
         linked.activity_id = Some("g1".to_string());
-        assert!(plan_reconciliation(&[linked], &[generated("g1", &due)], date(TODAY)).is_empty());
+        assert!(
+            plan_reconciliation(&[linked], &[generated("g1", &due)], None, date(TODAY)).is_empty()
+        );
     }
 
     #[test]
     fn a_real_activity_replaces_the_generated_one() {
         let mut due = flow("f1", "2026-11-01", DebtFlowType::InterestCash, dec!(1.83));
-        due.status = DebtFlowStatus::Received;
+        due.status = DebtFlowStatus::Estimated;
         due.activity_id = Some("g1".to_string());
         let activities = vec![
             generated("g1", &due),
             activity("real", ACTIVITY_TYPE_INTEREST, "2026-11-03", dec!(1.83)),
         ];
 
-        let actions = plan_reconciliation(&[due], &activities, date(TODAY));
+        let actions = plan_reconciliation(&[due], &activities, None, date(TODAY));
 
         assert!(matches!(
             &actions[..],
@@ -558,16 +595,16 @@ mod tests {
     #[test]
     fn a_deleted_generated_activity_turns_the_flow_late() {
         let mut due = flow("f1", "2026-11-01", DebtFlowType::InterestCash, dec!(1.83));
-        due.status = DebtFlowStatus::Received;
+        due.status = DebtFlowStatus::Estimated;
 
-        let actions = plan_reconciliation(&[due.clone()], &[], date(TODAY));
+        let actions = plan_reconciliation(&[due.clone()], &[], None, date(TODAY));
         assert!(matches!(
             &actions[..],
             [ReconcileAction::Settle { settlement, .. }] if settlement.status == DebtFlowStatus::Late
         ));
 
         due.status = DebtFlowStatus::Late;
-        assert!(plan_reconciliation(&[due], &[], date(TODAY)).is_empty());
+        assert!(plan_reconciliation(&[due], &[], None, date(TODAY)).is_empty());
     }
 
     #[test]
@@ -583,6 +620,7 @@ mod tests {
                 "2026-11-01",
                 dec!(1.83),
             )],
+            None,
             date(TODAY),
         );
         assert!(actions.is_empty());
@@ -597,8 +635,52 @@ mod tests {
                 "2026-10-12",
                 dec!(1.83),
             )],
+            None,
             date(TODAY),
         );
         assert_eq!(actions, vec![ReconcileAction::Generate(due)]);
+    }
+
+    #[test]
+    fn a_statement_covering_an_unpaid_flow_turns_it_late() {
+        let mut estimated = flow("f1", "2026-10-01", DebtFlowType::InterestCash, dec!(1.83));
+        estimated.status = DebtFlowStatus::Estimated;
+        estimated.activity_id = Some("g1".to_string());
+        let unbooked = flow("f2", "2026-10-15", DebtFlowType::InterestCash, dec!(1.83));
+        let mut pik = flow("f3", "2026-10-01", DebtFlowType::InterestPik, dec!(0.5));
+        pik.status = DebtFlowStatus::Estimated;
+        pik.activity_id = Some("g3".to_string());
+        let flows = [estimated.clone(), unbooked, pik.clone()];
+        let activities = [generated("g1", &estimated), generated("g3", &pik)];
+
+        // Statement not imported past the flows yet: estimates stand.
+        let partial = Some((date("2026-01-01"), date("2026-10-10")));
+        let actions = plan_reconciliation(&flows, &activities, partial, date(TODAY));
+        assert_eq!(actions, vec![ReconcileAction::Generate(flows[1].clone())]);
+
+        // Statement covers them without paying: late, estimate removed. PIK
+        // has no cash counterpart and stays estimated.
+        let covered = Some((date("2026-01-01"), date("2026-11-15")));
+        let actions = plan_reconciliation(&flows, &activities, covered, date(TODAY));
+        let late: Vec<_> = actions
+            .iter()
+            .map(|a| match a {
+                ReconcileAction::Settle {
+                    flow_id,
+                    settlement,
+                    delete_activity,
+                } => {
+                    assert_eq!(settlement.status, DebtFlowStatus::Late);
+                    (flow_id.as_str(), delete_activity.clone())
+                }
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(late, vec![("f1", Some("g1".to_string())), ("f2", None)]);
+
+        // A flow before the first imported activity is not judged.
+        let later = Some((date("2026-10-10"), date("2026-11-15")));
+        let actions = plan_reconciliation(&flows[..1], &activities, later, date(TODAY));
+        assert!(actions.is_empty());
     }
 }
