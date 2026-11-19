@@ -11,6 +11,7 @@ import ConnectPage from "@/features/wealthfolio-connect/pages/connect-page";
 import ActivityManagerPage from "@/pages/activity/activity-manager-page";
 import ActivityPage from "@/pages/activity/activity-page";
 import ActivityImportPage from "@/pages/activity/import/activity-import-page";
+import PrivateDebtImportPage from "@/pages/activity/import/private-debt/private-debt-import-page";
 import AssetsPage from "@/pages/asset/assets-page";
 import PortfolioPage from "@/pages/dashboard/portfolio-page";
 import HoldingsPage from "@/pages/holdings/holdings-page";
@@ -135,6 +136,7 @@ export function AppRoutes() {
           <Route path="holdings-insights" element={<HoldingsInsightsPage />} />
           <Route path="holdings/:assetId" element={<AssetProfilePage />} />
           <Route path="import" element={<ActivityImportPage />} />
+          <Route path="import/private-debt" element={<PrivateDebtImportPage />} />
           <Route path="accounts/:id" element={<AccountPage />} />
           <Route path="income" element={<IncomePage />} />
           <Route path="performance" element={<PerformancePage />} />

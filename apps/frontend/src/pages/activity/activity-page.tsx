@@ -201,6 +201,11 @@ const ActivityPage = () => {
             onClick: () => navigate("/import"),
           },
           {
+            icon: Icons.Coins,
+            label: "Import Private Debt (Maclear)",
+            onClick: () => navigate("/import/private-debt"),
+          },
+          {
             icon: Icons.Holdings,
             label: "Transfer Holdings",
             onClick: () => setShowBulkHoldingsForm(true),
