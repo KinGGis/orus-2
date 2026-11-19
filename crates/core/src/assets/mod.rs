@@ -28,6 +28,7 @@ pub use asset_id::{
     parse_crypto_pair_symbol, parse_symbol_with_exchange_suffix, symbol_resolution_candidates,
     unknown_dotted_suffix_fallback,
 };
+pub(crate) use assets_model::{add_months, months_per_period};
 pub use assets_model::{
     build_asset_metadata, build_option_metadata, canonicalize_market_identity,
     normalize_quote_ccy_code, parse_metal_weight_oz, resolve_quote_ccy_precedence, Asset,
