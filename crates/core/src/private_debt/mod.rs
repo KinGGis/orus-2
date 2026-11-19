@@ -5,9 +5,11 @@
 
 mod private_debt_model;
 mod private_debt_traits;
+mod schedule_engine;
 
 pub use private_debt_model::{
     DebtFlowSettlement, DebtFlowStatus, DebtFlowType, DebtScheduleFlow, NewDebtScheduleFlow,
     RateFixing,
 };
 pub use private_debt_traits::{DebtScheduleRepositoryTrait, RateFixingRepositoryTrait};
+pub use schedule_engine::build_schedule;

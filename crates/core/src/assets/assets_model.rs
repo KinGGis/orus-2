@@ -238,7 +238,7 @@ impl BondSpec {
 }
 
 /// Map a coupon frequency string to the number of months between payments.
-fn months_per_period(freq: &str) -> Option<u32> {
+pub(crate) fn months_per_period(freq: &str) -> Option<u32> {
     match freq.to_ascii_uppercase().as_str() {
         "ANNUAL" => Some(12),
         "SEMI_ANNUAL" => Some(6),
@@ -249,7 +249,7 @@ fn months_per_period(freq: &str) -> Option<u32> {
 }
 
 /// Add `months` months to `date`, clamping the day to the last day of the resulting month.
-fn add_months(date: chrono::NaiveDate, months: u32) -> Option<chrono::NaiveDate> {
+pub(crate) fn add_months(date: chrono::NaiveDate, months: u32) -> Option<chrono::NaiveDate> {
     use chrono::Datelike;
     let total = date.year() as i32 * 12 + (date.month() as i32 - 1) + months as i32;
     let year = total.div_euclid(12);
