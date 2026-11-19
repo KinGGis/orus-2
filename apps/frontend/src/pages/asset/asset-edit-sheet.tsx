@@ -487,7 +487,9 @@ export function AssetEditSheet({
       // Build metadata: merge existing metadata, update bond section if INTERNAL_YTM
       const updatedMetadata: Record<string, unknown> = { ...(asset.metadata ?? {}) };
       if (values.quoteMode === QuoteMode.INTERNAL_YTM && values.bond) {
-        updatedMetadata.bond = serializeBondSpec(values.bond);
+        // Merge so terms the form does not edit (private debt terms…) survive.
+        const existingBond = (asset.metadata?.bond ?? {}) as Record<string, unknown>;
+        updatedMetadata.bond = { ...existingBond, ...serializeBondSpec(values.bond) };
       }
 
       try {

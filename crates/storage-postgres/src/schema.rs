@@ -249,6 +249,39 @@ diesel::table! {
 }
 
 diesel::table! {
+    wf_debt_schedule_flows (id) {
+        id -> Uuid,
+        account_id -> Uuid,
+        asset_id -> Uuid,
+        flow_date -> Date,
+        flow_type -> Text,
+        period_start -> Nullable<Date>,
+        expected_amount -> Numeric,
+        currency -> Text,
+        rate_applied -> Nullable<Numeric>,
+        principal_before -> Nullable<Numeric>,
+        status -> Text,
+        received_amount -> Nullable<Numeric>,
+        received_date -> Nullable<Date>,
+        activity_id -> Nullable<Uuid>,
+        notes -> Nullable<Text>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    wf_rate_fixings (id) {
+        id -> Uuid,
+        index_code -> Text,
+        fixing_date -> Date,
+        rate -> Numeric,
+        source -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     wf_taxonomies (id) {
         id -> Text,
         name -> Text,
@@ -554,6 +587,9 @@ diesel::joinable!(wf_asset_taxonomy_assignments -> wf_taxonomies (taxonomy_id));
 diesel::joinable!(wf_brokers_sync_state -> wf_accounts (account_id));
 diesel::joinable!(wf_brokers_sync_state -> wf_import_runs (last_run_id));
 diesel::joinable!(wf_daily_account_valuation -> wf_accounts (account_id));
+diesel::joinable!(wf_debt_schedule_flows -> wf_accounts (account_id));
+diesel::joinable!(wf_debt_schedule_flows -> wf_activities (activity_id));
+diesel::joinable!(wf_debt_schedule_flows -> wf_assets (asset_id));
 diesel::joinable!(wf_goals_allocation -> wf_accounts (account_id));
 diesel::joinable!(wf_goals_allocation -> wf_goals (goal_id));
 diesel::joinable!(wf_holdings_snapshots -> wf_accounts (account_id));
@@ -580,6 +616,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     wf_brokers_sync_state,
     wf_contribution_limits,
     wf_daily_account_valuation,
+    wf_debt_schedule_flows,
     wf_goals,
     wf_goals_allocation,
     wf_health_issue_dismissals,
@@ -589,6 +626,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     wf_platforms,
     wf_quote_sync_state,
     wf_quotes,
+    wf_rate_fixings,
     wf_revolut_accounts,
     wf_revolut_auth_tokens,
     wf_revolut_sync_log,

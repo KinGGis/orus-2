@@ -152,6 +152,33 @@ pub struct BondSpec {
     /// Date of the first coupon payment after issuance / settlement. Used to
     /// auto-generate `coupon_schedule` when none is provided.
     pub first_coupon_date: Option<chrono::NaiveDate>,
+
+    // ── Private debt terms ──────────────────────────────────────────────────
+    /// Start of interest accrual (funding / issue date).
+    pub issue_date: Option<chrono::NaiveDate>,
+    /// "FIXED" (default) or "FLOATING".
+    pub rate_type: Option<String>,
+    /// Reference index for floating loans, matching `wf_rate_fixings.index_code`
+    /// (e.g. "EURIBOR_3M").
+    pub rate_index: Option<String>,
+    /// Margin over the index, in basis points.
+    pub rate_margin_bps: Option<Decimal>,
+    /// Floor / cap on the all-in annual rate, as decimals.
+    pub rate_floor: Option<Decimal>,
+    pub rate_cap: Option<Decimal>,
+    /// Annual rate capitalised into principal instead of paid (PIK), as a decimal.
+    /// Adds to the cash coupon (`coupon_rate`) when both are set.
+    pub pik_rate: Option<Decimal>,
+    /// "BULLET" (default), "LINEAR", "ANNUITY" or "CUSTOM".
+    pub amortization_type: Option<String>,
+    /// Comma-separated "YYYY-MM-DD:amount" principal repayments, for CUSTOM amortisation.
+    pub amortization_schedule: Option<String>,
+    /// How the position is marked: "PAR", "AMORTIZED_COST", "YTM" or "MANUAL".
+    pub valuation_method: Option<String>,
+    pub borrower: Option<String>,
+    /// e.g. "SENIOR_SECURED", "SENIOR_UNSECURED", "SUBORDINATED", "MEZZANINE".
+    pub seniority: Option<String>,
+    pub internal_rating: Option<String>,
 }
 
 impl BondSpec {
