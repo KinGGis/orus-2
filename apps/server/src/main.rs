@@ -62,10 +62,34 @@ mod tests {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Database access is synchronous (diesel over r2d2) and runs directly on the
+/// async workers. Tokio starts one worker per CPU — a single one on the hosted
+/// instance — so one slow query stalls every other request, timers and
+/// in-flight broker calls included. Workers waiting on Postgres use no CPU, so
+/// running more of them than there are CPUs keeps the server responsive.
+const MIN_WORKER_THREADS: usize = 8;
+
+fn main() -> anyhow::Result<()> {
+    let workers = std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .max(MIN_WORKER_THREADS)
+        });
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?
+        .block_on(run(workers))
+}
+
+async fn run(workers: usize) -> anyhow::Result<()> {
     let config = Config::from_env();
     init_tracing();
+    info!("Async runtime started with {} worker threads", workers);
     let state = build_state(&config).await?;
 
     #[cfg(feature = "device-sync")]
