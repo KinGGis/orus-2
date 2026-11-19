@@ -178,6 +178,25 @@ pub async fn process_portfolio_job(
         Err(err) => tracing::warn!("bond_coupons: materialization failed: {}", err),
     }
 
+    // Same for private loans: refresh their schedules and settle the flows
+    // due, generating the activities not booked yet.
+    if let (Some(schedules), Some(fixings)) = (
+        state.debt_schedule_repository.clone(),
+        state.rate_fixing_repository.clone(),
+    ) {
+        if let Err(err) = wealthfolio_core::private_debt::sync_private_debt(
+            state.asset_service.clone(),
+            state.activity_service.clone(),
+            schedules,
+            fixings,
+            today,
+        )
+        .await
+        {
+            tracing::warn!("private_debt: schedule sync failed: {}", err);
+        }
+    }
+
     event_bus.publish(ServerEvent::new(PORTFOLIO_UPDATE_START));
 
     // For TOTAL portfolio calculation, use non-archived accounts (ignores is_active)

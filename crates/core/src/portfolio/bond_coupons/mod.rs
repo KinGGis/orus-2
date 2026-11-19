@@ -74,6 +74,10 @@ pub async fn materialize_bond_coupons(
         let Some(bond) = asset.bond_spec() else {
             continue;
         };
+        // Private loans are booked from their own schedule (private_debt).
+        if bond.valuation_method.is_some() {
+            continue;
+        }
         let Some(coupon_rate) = bond.coupon_rate else {
             continue;
         };

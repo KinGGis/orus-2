@@ -117,6 +117,11 @@ pub struct AppState {
     pub token_lifecycle: Arc<TokenLifecycleState>,
     /// Historised captures of what the broker reported, written at each sync.
     pub broker_snapshot_repository: Arc<dyn BrokerSnapshotRepositoryTrait>,
+    /// Private debt schedules and rate fixings (Postgres only).
+    pub debt_schedule_repository:
+        Option<Arc<dyn wealthfolio_core::private_debt::DebtScheduleRepositoryTrait>>,
+    pub rate_fixing_repository:
+        Option<Arc<dyn wealthfolio_core::private_debt::RateFixingRepositoryTrait>>,
     // DFC-specific repositories
     pub user_repository: Arc<dyn UserStore>,
     pub revolut_repository: Arc<dyn RevolutStore>,
@@ -245,6 +250,15 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         let broker_sync_state_repository = Arc::new(
             wealthfolio_storage_postgres::sync::BrokerSyncStateRepository::new(pool.clone()),
         );
+        let debt_schedule_repository: Arc<
+            dyn wealthfolio_core::private_debt::DebtScheduleRepositoryTrait,
+        > = Arc::new(
+            wealthfolio_storage_postgres::private_debt::DebtScheduleRepository::new(pool.clone()),
+        );
+        let rate_fixing_repository: Arc<dyn wealthfolio_core::private_debt::RateFixingRepositoryTrait> =
+            Arc::new(wealthfolio_storage_postgres::private_debt::RateFixingRepository::new(
+                pool.clone(),
+            ));
         let platform_repository = Arc::new(
             wealthfolio_storage_postgres::sync::PlatformRepository::new(pool.clone()),
         );
@@ -534,6 +548,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             health_service,
             token_lifecycle,
             broker_snapshot_repository,
+            debt_schedule_repository: Some(debt_schedule_repository),
+            rate_fixing_repository: Some(rate_fixing_repository),
             user_repository,
             revolut_repository,
             revolut_oauth_config,
@@ -926,6 +942,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         health_service,
         token_lifecycle,
         broker_snapshot_repository,
+        debt_schedule_repository: None,
+        rate_fixing_repository: None,
         user_repository,
         revolut_repository,
         revolut_oauth_config,
