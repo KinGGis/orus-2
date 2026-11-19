@@ -33,6 +33,7 @@ pub mod health;
 pub mod limits;
 pub mod market_data;
 pub mod portfolio;
+pub mod private_debt;
 pub mod revolut;
 pub mod schema;
 pub mod settings;

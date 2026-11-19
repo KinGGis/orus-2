@@ -16,6 +16,7 @@ pub mod goals;
 pub mod health;
 pub mod limits;
 pub mod portfolio;
+pub mod private_debt;
 pub mod quotes;
 pub mod revolut;
 pub mod secrets;

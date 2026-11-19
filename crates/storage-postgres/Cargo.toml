@@ -37,5 +37,9 @@ chacha20poly1305 = { workspace = true }
 rand = { workspace = true }
 base64 = "0.21"
 
+[dev-dependencies]
+tokio = { workspace = true }
+rust_decimal_macros = { workspace = true }
+
 [lints]
 workspace = true
