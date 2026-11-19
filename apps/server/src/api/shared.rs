@@ -187,6 +187,7 @@ pub async fn process_portfolio_job(
         if let Err(err) = wealthfolio_core::private_debt::sync_private_debt(
             state.asset_service.clone(),
             state.activity_service.clone(),
+            state.quote_service.clone(),
             schedules,
             fixings,
             today,

@@ -15,12 +15,18 @@
 //!    is removed and the flow turns LATE. Future flows stay projections in the
 //!    schedule. PIK interest is booked as INTEREST reinvested through a BUY of
 //!    the same amount.
+//!
+//! The loan is then priced daily from its schedule (see [`super::valuation`]),
+//! from the first account holding it. Its quotes are stored under the
+//! INTERNAL_BOND_MODEL source, and its quote mode is kept MANUAL so that no
+//! market provider prices it: a quote entered by the user on a given day
+//! takes precedence over the computed one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use log::{info, warn};
 use rust_decimal::Decimal;
 
@@ -29,12 +35,14 @@ use super::private_debt_model::{
 };
 use super::private_debt_traits::{DebtScheduleRepositoryTrait, RateFixingRepositoryTrait};
 use super::schedule_engine::build_schedule;
+use super::valuation::{price_series, Purchase, ValuationMethod};
 use crate::activities::{
     Activity, ActivityServiceTrait, ActivityType, NewActivity, SymbolInput, ACTIVITY_TYPE_BUY,
     ACTIVITY_TYPE_FEE, ACTIVITY_TYPE_INTEREST, ACTIVITY_TYPE_SELL,
 };
-use crate::assets::{Asset, AssetServiceTrait, BondSpec};
+use crate::assets::{Asset, AssetServiceTrait, BondSpec, QuoteMode};
 use crate::errors::Result;
+use crate::quotes::{DataSource, Quote, QuoteServiceTrait};
 
 /// Prefix of the idempotency key of activities generated from a schedule.
 pub const GENERATED_KEY_PREFIX: &str = "DEBT_FLOW:";
@@ -47,12 +55,14 @@ pub struct DebtSyncSummary {
     pub loans: usize,
     pub activities_created: usize,
     pub flows_settled: usize,
+    pub quotes_written: usize,
     pub failures: usize,
 }
 
 pub async fn sync_private_debt(
     asset_service: Arc<dyn AssetServiceTrait + Send + Sync>,
     activity_service: Arc<dyn ActivityServiceTrait + Send + Sync>,
+    quote_service: Arc<dyn QuoteServiceTrait + Send + Sync>,
     schedules: Arc<dyn DebtScheduleRepositoryTrait>,
     fixings: Arc<dyn RateFixingRepositoryTrait>,
     today: NaiveDate,
@@ -83,6 +93,19 @@ pub async fn sync_private_debt(
     let real = |a: &&Activity| a.is_posted() && !is_generated(a.idempotency_key.as_deref());
 
     for (asset, spec) in &loans {
+        if asset.quote_mode != QuoteMode::Manual {
+            if let Err(err) = asset_service
+                .update_quote_mode_silent(&asset.id, QuoteMode::Manual.as_db_str())
+                .await
+            {
+                warn!(
+                    "private_debt: cannot set {} to manual quotes: {}",
+                    asset.id, err
+                );
+            }
+        }
+        let mut priced = false;
+
         let mut accounts: Vec<&str> = activities
             .iter()
             .filter(|a| a.asset_id.as_deref() == Some(asset.id.as_str()))
@@ -150,11 +173,129 @@ pub async fn sync_private_debt(
                     summary.failures += 1;
                 }
             }
+
+            if !priced {
+                priced = true;
+                let result = price_loan(
+                    asset,
+                    spec,
+                    &schedules.list_flows(account_id, &asset.id)?,
+                    purchase(spec, &held, start),
+                    today,
+                    quote_service.as_ref(),
+                )
+                .await;
+                match result {
+                    Ok(written) => summary.quotes_written += written,
+                    Err(err) => {
+                        warn!("private_debt: valuation of {} failed: {}", asset.id, err);
+                        summary.failures += 1;
+                    }
+                }
+            }
         }
     }
 
     info!("private_debt: {:?}", summary);
     Ok(summary)
+}
+
+/// Average price paid per unit for the loan, and date of the first purchase.
+/// Purchases without a price count at par.
+fn purchase(spec: &BondSpec, held: &[&Activity], start: NaiveDate) -> Purchase {
+    let face_value = spec.face_value.unwrap_or(Decimal::ONE);
+    let (quantity, cost, first) = held
+        .iter()
+        .filter(|a| !is_generated(a.idempotency_key.as_deref()))
+        .filter(|a| {
+            matches!(
+                ActivityType::from_str(&a.activity_type),
+                Ok(ActivityType::Buy) | Ok(ActivityType::TransferIn)
+            )
+        })
+        .fold((Decimal::ZERO, Decimal::ZERO, None), |(q, c, first), a| {
+            let price = Some(a.price())
+                .filter(|p| *p > Decimal::ZERO)
+                .unwrap_or(face_value);
+            let date = a.effective_date();
+            let first = Some(first.map_or(date, |f: NaiveDate| f.min(date)));
+            (q + a.qty(), c + a.qty() * price, first)
+        });
+    Purchase {
+        price: if quantity > Decimal::ZERO {
+            cost / quantity
+        } else {
+            face_value
+        },
+        date: first.unwrap_or(start),
+    }
+}
+
+/// Writes the computed prices of the loan that changed, and removes the
+/// computed quotes it no longer has. Returns the number of quotes written.
+async fn price_loan(
+    asset: &Asset,
+    spec: &BondSpec,
+    flows: &[DebtScheduleFlow],
+    purchase: Purchase,
+    today: NaiveDate,
+    quotes: &(dyn QuoteServiceTrait + Send + Sync),
+) -> Result<usize> {
+    let method = ValuationMethod::parse(spec.valuation_method.as_deref().unwrap_or_default())?;
+    let series = price_series(method, spec, flows, purchase, today)?;
+
+    let existing: HashMap<NaiveDate, (String, Decimal)> = quotes
+        .get_historical_quotes(&asset.id)?
+        .into_iter()
+        .filter(|q| q.data_source == DataSource::InternalBondModel)
+        .map(|q| (q.timestamp.date_naive(), (q.id, q.close)))
+        .collect();
+    let days: HashSet<NaiveDate> = series.iter().map(|(day, _)| *day).collect();
+
+    let changed: Vec<Quote> = series
+        .into_iter()
+        .filter(|(day, price)| existing.get(day).is_none_or(|(_, close)| close != price))
+        .map(|(day, price)| loan_quote(asset, method, day, price))
+        .collect();
+    let written = changed.len();
+    if written > 0 {
+        quotes.bulk_upsert_quotes(changed).await?;
+    }
+    for (id, _) in existing
+        .into_iter()
+        .filter(|(day, _)| !days.contains(day))
+        .map(|(_, quote)| quote)
+    {
+        quotes.delete_quote(&id).await?;
+    }
+    Ok(written)
+}
+
+fn loan_quote(asset: &Asset, method: ValuationMethod, day: NaiveDate, price: Decimal) -> Quote {
+    let timestamp = day
+        .and_hms_opt(16, 0, 0)
+        .map(|dt| Utc.from_utc_datetime(&dt))
+        .unwrap_or_else(Utc::now);
+    Quote {
+        id: format!(
+            "{}_{}_{}",
+            asset.id,
+            day,
+            DataSource::InternalBondModel.as_str()
+        ),
+        asset_id: asset.id.clone(),
+        timestamp,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        adjclose: price,
+        volume: Decimal::ZERO,
+        currency: asset.quote_ccy.clone(),
+        data_source: DataSource::InternalBondModel,
+        created_at: Utc::now(),
+        notes: Some(format!("Private debt valuation ({})", method.as_str())),
+    }
 }
 
 /// Period the imported statements cover: from the first to the last real
