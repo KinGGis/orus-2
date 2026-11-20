@@ -63,17 +63,43 @@ pub(crate) fn consolidate_with_members(
     members: &[DailyAccountValuation],
 ) {
     let mut by_date: HashMap<NaiveDate, (Decimal, bool)> = HashMap::new();
+    let mut valued_days: HashSet<(&str, NaiveDate)> = HashSet::new();
+    let mut reported_navs: HashMap<&str, BTreeMap<NaiveDate, Decimal>> = HashMap::new();
     for member in members {
+        let value = member.total_value * member.fx_rate_to_base;
         let entry = by_date
             .entry(member.valuation_date)
             .or_insert((Decimal::ZERO, false));
-        entry.0 += member.total_value * member.fx_rate_to_base;
+        entry.0 += value;
         entry.1 |= member.source == ValuationSource::BrokerImported;
+        valued_days.insert((&member.account_id, member.valuation_date));
+        if member.source == ValuationSource::BrokerImported {
+            reported_navs
+                .entry(&member.account_id)
+                .or_default()
+                .insert(member.valuation_date, value);
+        }
     }
 
     let broker_flows = broker_reported_flows(members);
     for total in totals.iter_mut() {
-        if let Some((value, true)) = by_date.get(&total.valuation_date).copied() {
+        let date = total.valuation_date;
+        let (mut value, mut reported) = by_date
+            .get(&date)
+            .copied()
+            .unwrap_or((Decimal::ZERO, false));
+        // A reported portfolio with no row that day (weekend, holiday) keeps
+        // its last NAV, otherwise TOTAL drops to the other portfolios alone.
+        for (account_id, navs) in &reported_navs {
+            if valued_days.contains(&(*account_id, date)) {
+                continue;
+            }
+            if let Some(nav) = broker_nav_on(navs, date) {
+                value += nav;
+                reported = true;
+            }
+        }
+        if reported {
             total.total_value = value;
             total.investment_market_value = value - total.cash_balance;
         }
@@ -678,6 +704,30 @@ mod tests {
         assert_eq!(totals[1].investment_market_value, dec!(530));
         assert_eq!(totals[1].net_contribution, dec!(500));
         assert_eq!(totals[1].source, Calculated);
+    }
+
+    #[test]
+    fn total_carries_reported_nav_over_weekends_missing_from_a_member() {
+        use ValuationSource::{BrokerImported, Calculated};
+
+        // Fri 6, Sat 7 and Sun 8 Nov 2026; the broker reports Friday only.
+        let mut totals = vec![
+            row("TOTAL", 6, dec!(900), Decimal::ONE, Calculated),
+            row("TOTAL", 7, dec!(300), Decimal::ONE, Calculated),
+            row("TOTAL", 8, dec!(300), Decimal::ONE, Calculated),
+        ];
+        let members = vec![
+            row("ibkr", 6, dec!(200), dec!(1.2), BrokerImported),
+            row("pe", 6, dec!(300), Decimal::ONE, Calculated),
+            row("pe", 7, dec!(300), Decimal::ONE, Calculated),
+            row("pe", 8, dec!(300), Decimal::ONE, Calculated),
+        ];
+
+        consolidate_with_members(&mut totals, &members);
+
+        assert_eq!(totals[0].total_value, dec!(540));
+        assert_eq!(totals[1].total_value, dec!(540));
+        assert_eq!(totals[2].total_value, dec!(540));
     }
 
     #[test]
