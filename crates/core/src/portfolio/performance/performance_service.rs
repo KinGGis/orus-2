@@ -58,6 +58,21 @@ const TRADING_DAYS_PER_YEAR: u32 = 252;
 const DAYS_PER_YEAR_DECIMAL: Decimal = dec!(365.25);
 const SQRT_TRADING_DAYS_APPROX: Decimal = dec!(15.874507866); // sqrt(252)
 
+/// Gain over the capital employed: the opening value plus the money put in.
+///
+/// Dividing by the opening value alone treated every later deposit as free
+/// capital: an account opened with 500 and topped up to 1 200 showed its gain
+/// as a share of the first 500. Withdrawals are not subtracted, so a large one
+/// cannot shrink the base towards zero and blow the ratio up.
+fn simple_return_on_capital(gain: Decimal, start_value: Decimal, net_cash_flow: Decimal) -> Decimal {
+    let capital = start_value + net_cash_flow.max(Decimal::ZERO);
+    if capital <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        gain / capital
+    }
+}
+
 impl PerformanceService {
     pub fn new(
         valuation_service: Arc<dyn ValuationServiceTrait + Send + Sync>,
@@ -283,16 +298,11 @@ impl PerformanceService {
 
         let gain_loss_amount = end_point.total_value - start_value_for_gain_calc - net_cash_flow;
 
-        let simple_total_return = if start_value_for_gain_calc.is_zero() {
-            if gain_loss_amount.is_zero() {
-                Decimal::ZERO
-            } else {
-                warn!("Simple total return calculation: start_value_for_gain_calc is zero but gain_loss_amount is non-zero for account_id: {}. Returning 0.", account_id);
-                Decimal::ZERO
-            }
-        } else {
-            gain_loss_amount / start_value_for_gain_calc
-        };
+        let simple_total_return =
+            simple_return_on_capital(gain_loss_amount, start_value_for_gain_calc, net_cash_flow);
+        if simple_total_return.is_zero() && !gain_loss_amount.is_zero() {
+            warn!("Simple total return calculation: no capital employed but gain_loss_amount is non-zero for account_id: {}. Returning 0.", account_id);
+        }
 
         let annualized_simple_return = Self::calculate_annualized_return(
             actual_start_date,
@@ -403,11 +413,8 @@ impl PerformanceService {
 
         let gain_loss_amount = end_value - start_value - net_cash_flow;
 
-        let simple_total_return = if start_value.is_zero() {
-            Decimal::ZERO
-        } else {
-            (end_value - start_value - net_cash_flow) / start_value
-        };
+        let simple_total_return =
+            simple_return_on_capital(gain_loss_amount, start_value, net_cash_flow);
 
         let annualized_simple_return = Self::calculate_annualized_return(
             actual_start_date,
@@ -952,5 +959,25 @@ impl PerformanceServiceTrait for PerformanceService {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_return_counts_later_deposits_as_capital() {
+        // Opened with 500, topped up by 700, worth 1 525.97 today.
+        let gain = dec!(1525.97) - dec!(500) - dec!(700);
+        let r = simple_return_on_capital(gain, dec!(500), dec!(700));
+        assert_eq!(r.round_dp(4), dec!(0.2716));
+    }
+
+    #[test]
+    fn simple_return_ignores_withdrawals_in_the_base() {
+        let r = simple_return_on_capital(dec!(10), dec!(100), dec!(-90));
+        assert_eq!(r, dec!(0.1));
+        assert_eq!(simple_return_on_capital(dec!(5), Decimal::ZERO, Decimal::ZERO), Decimal::ZERO);
     }
 }
