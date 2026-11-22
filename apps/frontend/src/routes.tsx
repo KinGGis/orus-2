@@ -30,6 +30,7 @@ import OnboardingPage from "./pages/onboarding/onboarding-page";
 import AboutSettingsPage from "./pages/settings/about/about-page";
 import AddonSettingsPage from "./pages/settings/addons/addon-settings";
 import AiProvidersPage from "./pages/settings/ai-providers/ai-providers-page";
+import McpSettingsPage from "./pages/settings/mcp/mcp-settings-page";
 import ContributionLimitPage from "./pages/settings/contribution-limits/contribution-limits-page";
 import ExportSettingsPage from "./pages/settings/exports/exports-page";
 import GeneralSettingsPage from "./pages/settings/general/general-page";
@@ -187,6 +188,7 @@ export function AppRoutes() {
             <Route path="snaptrade" element={<SnapTradeSettingsPage />} />
             <Route path="ibkr" element={<IbkrSettingsPage />} />
             <Route path="ai-providers" element={<AiProvidersPage />} />
+          <Route path="mcp" element={<McpSettingsPage />} />
             <Route path="addons" element={<AddonSettingsPage />} />
             <Route path="orus" element={<OrusSettingsPage />} />
           </Route>
