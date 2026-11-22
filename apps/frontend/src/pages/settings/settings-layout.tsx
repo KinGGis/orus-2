@@ -118,6 +118,12 @@ const settingsSections = [
         subtitle: "Configure AI for portfolio insights",
         icon: <Icons.SparklesOutline className="size-5" />,
       },
+      {
+        title: "Agents IA (MCP)",
+        href: "mcp",
+        subtitle: "API keys for external AI agents",
+        icon: <Icons.ShieldCheck className="size-5" />,
+      },
     ],
   },
   {
