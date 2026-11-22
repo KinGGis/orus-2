@@ -80,7 +80,7 @@ impl IbkrTokenStore for SecretStoreTokens {
 }
 
 /// Build an MCP-backed broker client from the stored credentials.
-fn create_ibkr_client(state: &AppState) -> ApiResult<IbkrMcpClient> {
+pub(crate) fn create_ibkr_client(state: &AppState) -> ApiResult<IbkrMcpClient> {
     let client_id = state
         .secret_store
         .get_secret(IBKR_CLIENT_ID_KEY)?
@@ -556,7 +556,7 @@ impl Drop for SyncRunningGuard {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SyncStartedResponse {
+pub(crate) struct SyncStartedResponse {
     message: String,
 }
 
@@ -573,7 +573,9 @@ struct SyncStartedResponse {
 ///
 /// Progress and the final outcome already travel over the event bus, which the
 /// frontend consumes through SSE, so nothing is lost by answering early.
-async fn sync_ibkr(State(state): State<Arc<AppState>>) -> ApiResult<Json<SyncStartedResponse>> {
+pub(crate) async fn sync_ibkr(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<SyncStartedResponse>> {
     use std::sync::atomic::Ordering;
 
     // Validate the connection while the caller is still listening: an expired

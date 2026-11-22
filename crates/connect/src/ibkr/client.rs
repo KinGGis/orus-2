@@ -285,6 +285,21 @@ impl IbkrMcpClient {
         self.mcp.open_session().await
     }
 
+    /// Every tool IBKR's MCP server exposes, as it describes them.
+    pub async fn list_tools(&self) -> Result<Vec<serde_json::Value>> {
+        self.mcp.list_tools().await
+    }
+
+    /// Call any IBKR tool and return its raw `tools/call` result, so Orus can
+    /// relay it to its own MCP clients.
+    pub async fn call_tool_raw(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.mcp.call_tool_raw(name, arguments).await
+    }
+
     /// Cash movements (dividends, interest, fees, deposits) are not exposed by
     /// any tool this client knows. Log every tool IBKR added since, with its
     /// input schema, so a new one can be wired without guessing its shape.

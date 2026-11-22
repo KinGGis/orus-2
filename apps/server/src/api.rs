@@ -39,6 +39,8 @@ mod holdings;
 mod ibkr;
 mod limits;
 mod market_data;
+#[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+mod mcp;
 mod net_worth;
 mod performance;
 mod portfolio;
@@ -128,7 +130,8 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
     {
         protected_api = protected_api
             .merge(connect::router())
-            .merge(ibkr::router());
+            .merge(ibkr::router())
+            .merge(mcp::management_router());
     }
 
     let protected_api = protected_api.route(
@@ -169,8 +172,13 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
         )
         .route("/auth/logout", axum::routing::post(auth::logout))
         .route("/auth/me", get(auth::auth_me))
-        .merge(protected_api)
-        .with_state(state.clone());
+        .merge(protected_api);
+
+    // The MCP endpoint authenticates AI agents with its own API keys.
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    let api = api.merge(mcp::router());
+
+    let api = api.with_state(state.clone());
 
     Router::new()
         .nest("/api/v1", api)
@@ -221,4 +229,5 @@ fn is_long_running_path(path: &str) -> bool {
         || path.ends_with("/connect/sync")
         || path.ends_with("/ibkr/sync")
         || path.ends_with("/ibkr/diagnostic")
+        || path.ends_with("/mcp")
 }

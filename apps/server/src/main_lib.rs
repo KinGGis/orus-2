@@ -122,6 +122,10 @@ pub struct AppState {
         Option<Arc<dyn wealthfolio_core::private_debt::DebtScheduleRepositoryTrait>>,
     pub rate_fixing_repository:
         Option<Arc<dyn wealthfolio_core::private_debt::RateFixingRepositoryTrait>>,
+    /// API keys and call journal of the MCP endpoint (Postgres only).
+    pub mcp_key_repository: Option<Arc<wealthfolio_storage_postgres::mcp::McpKeyRepository>>,
+    /// Services the AI tools read through, shared with the MCP endpoint.
+    pub ai_environment: Arc<ServerAiEnvironment>,
     // DFC-specific repositories
     pub user_repository: Arc<dyn UserStore>,
     pub revolut_repository: Arc<dyn RevolutStore>,
@@ -259,6 +263,9 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             Arc::new(wealthfolio_storage_postgres::private_debt::RateFixingRepository::new(
                 pool.clone(),
             ));
+        let mcp_key_repository = Arc::new(
+            wealthfolio_storage_postgres::mcp::McpKeyRepository::new(pool.clone()),
+        );
         let platform_repository = Arc::new(
             wealthfolio_storage_postgres::sync::PlatformRepository::new(pool.clone()),
         );
@@ -442,7 +449,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             performance_service.clone(),
             income_service.clone(),
         ));
-        let ai_chat_service = Arc::new(ChatService::new(ai_environment, ChatConfig::default()));
+        let ai_chat_service = Arc::new(ChatService::new(ai_environment.clone(), ChatConfig::default()));
 
         let cloud_api_url = crate::features::cloud_api_base_url().unwrap_or_default();
         let device_display_name = "Wealthfolio Server".to_string();
@@ -550,6 +557,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             broker_snapshot_repository,
             debt_schedule_repository: Some(debt_schedule_repository),
             rate_fixing_repository: Some(rate_fixing_repository),
+            mcp_key_repository: Some(mcp_key_repository),
+            ai_environment,
             user_repository,
             revolut_repository,
             revolut_oauth_config,
@@ -829,7 +838,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         performance_service.clone(),
         income_service.clone(),
     ));
-    let ai_chat_service = Arc::new(ChatService::new(ai_environment, ChatConfig::default()));
+    let ai_chat_service = Arc::new(ChatService::new(ai_environment.clone(), ChatConfig::default()));
 
     // Device enroll service for E2EE sync
     let cloud_api_url = crate::features::cloud_api_base_url().unwrap_or_default();
@@ -944,6 +953,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         broker_snapshot_repository,
         debt_schedule_repository: None,
         rate_fixing_repository: None,
+        mcp_key_repository: None,
+        ai_environment,
         user_repository,
         revolut_repository,
         revolut_oauth_config,

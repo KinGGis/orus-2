@@ -124,6 +124,32 @@ diesel::table! {
 }
 
 diesel::table! {
+    wf_mcp_api_keys (id) {
+        id -> Uuid,
+        name -> Text,
+        key_prefix -> Text,
+        key_hash -> Text,
+        scope -> Text,
+        created_at -> Timestamptz,
+        last_used_at -> Nullable<Timestamptz>,
+        revoked_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    wf_mcp_audit_log (id) {
+        id -> Uuid,
+        key_id -> Nullable<Uuid>,
+        tool_name -> Text,
+        arguments -> Nullable<Jsonb>,
+        success -> Bool,
+        error -> Nullable<Text>,
+        duration_ms -> Int4,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     wf_market_data_providers (id) {
         id -> Text,
         name -> Text,
@@ -594,6 +620,7 @@ diesel::joinable!(wf_goals_allocation -> wf_accounts (account_id));
 diesel::joinable!(wf_goals_allocation -> wf_goals (goal_id));
 diesel::joinable!(wf_holdings_snapshots -> wf_accounts (account_id));
 diesel::joinable!(wf_import_runs -> wf_accounts (account_id));
+diesel::joinable!(wf_mcp_audit_log -> wf_mcp_api_keys (key_id));
 diesel::joinable!(wf_quote_sync_state -> wf_assets (asset_id));
 diesel::joinable!(wf_quotes -> wf_assets (asset_id));
 diesel::joinable!(wf_revolut_accounts -> wf_accounts (wf_account_id));
@@ -623,6 +650,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     wf_holdings_snapshots,
     wf_import_runs,
     wf_market_data_providers,
+    wf_mcp_api_keys,
+    wf_mcp_audit_log,
     wf_platforms,
     wf_quote_sync_state,
     wf_quotes,
