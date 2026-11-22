@@ -6,7 +6,7 @@ use wealthfolio_core::private_debt::{
     import_private_debt, PrivateDebtImportRequest, PrivateDebtImportSummary,
 };
 
-async fn import_statement(
+pub(crate) async fn import_statement(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PrivateDebtImportRequest>,
 ) -> ApiResult<Json<PrivateDebtImportSummary>> {

@@ -32,6 +32,7 @@ pub mod goals;
 pub mod health;
 pub mod limits;
 pub mod market_data;
+pub mod mcp;
 pub mod portfolio;
 pub mod private_debt;
 pub mod revolut;

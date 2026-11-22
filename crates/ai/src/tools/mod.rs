@@ -59,7 +59,29 @@ pub use valuation::GetValuationHistoryTool;
 
 use std::sync::Arc;
 
+pub use rig::tool::ToolDyn;
+
 use crate::env::AiEnvironment;
+
+/// The tools that only read portfolio data, for callers exposing it outside
+/// the chat (the MCP endpoint). Tools that draft or change activities are left
+/// out: they expect the chat UI to confirm what they prepare.
+pub fn read_only_tools<E: AiEnvironment + 'static>(env: Arc<E>) -> Vec<Box<dyn ToolDyn>> {
+    let base_currency = env.base_currency();
+    let tools = ToolSet::new(env, base_currency);
+    vec![
+        Box::new(tools.accounts),
+        Box::new(tools.holdings),
+        Box::new(tools.allocation),
+        Box::new(tools.performance),
+        Box::new(tools.valuation),
+        Box::new(tools.activities),
+        Box::new(tools.income),
+        Box::new(tools.goals),
+        Box::new(tools.risk_analysis),
+        Box::new(tools.portfolio_summary),
+    ]
+}
 
 /// Container for all AI tools, simplifying tool registration across providers.
 pub struct ToolSet<E: AiEnvironment> {

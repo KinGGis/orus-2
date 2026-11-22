@@ -35,7 +35,7 @@ async fn list_accounts(
 }
 
 #[utoipa::path(post, path="/api/v1/accounts", request_body = NewAccount, responses((status=200, body = Account)))]
-async fn create_account(
+pub(crate) async fn create_account(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NewAccount>,
 ) -> ApiResult<Json<Account>> {

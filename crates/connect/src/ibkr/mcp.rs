@@ -55,6 +55,14 @@ impl McpClient {
             .unwrap_or_default())
     }
 
+    /// Invoke an MCP tool and return its `tools/call` result untouched
+    /// (`content`, `structuredContent`, `isError`), for relaying it as is.
+    pub async fn call_tool_raw(&self, name: &str, arguments: Value) -> Result<Value> {
+        self.ensure_session().await?;
+        let params = json!({ "name": name, "arguments": arguments });
+        self.request("tools/call", params).await
+    }
+
     /// Acquire an access token without performing any MCP call.
     ///
     /// Lets a caller tell an authorization failure apart from an MCP one;

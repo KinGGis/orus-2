@@ -31,7 +31,7 @@ async fn update_portfolio(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn recalculate_portfolio(
+pub(crate) async fn recalculate_portfolio(
     State(state): State<Arc<AppState>>,
     body: Option<Json<PortfolioRequestBody>>,
 ) -> ApiResult<StatusCode> {
