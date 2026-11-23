@@ -3,7 +3,8 @@
 //!
 //! Transport: stateless Streamable HTTP answering with plain JSON (no SSE).
 //! Authentication: `Authorization: Bearer orus_…` (or `x-api-key: orus_…`) API keys created in the
-//! settings, each with a READ or WRITE scope. Every tool call is journaled.
+//! settings, each with a READ or WRITE scope, or obtained through OAuth (see
+//! `mcp_oauth`). Every tool call is journaled.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +12,7 @@ use std::time::Instant;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get},
     Json, Router,
@@ -32,8 +33,8 @@ use crate::{
 };
 
 const KEY_PREFIX: &str = "orus_";
-const SCOPE_READ: &str = "READ";
-const SCOPE_WRITE: &str = "WRITE";
+pub(super) const SCOPE_READ: &str = "READ";
+pub(super) const SCOPE_WRITE: &str = "WRITE";
 const IBKR_TOOL_PREFIX: &str = "ibkr_";
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_LOGGED_ARGUMENT_BYTES: usize = 8 * 1024;
@@ -45,20 +46,23 @@ Write tools (activities, accounts, syncs, imports, IBKR orders) need a WRITE key
 
 /// Public MCP endpoint: authenticated by its own API keys, not by the session JWT.
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route(
-        "/mcp",
-        axum::routing::post(handle_mcp)
-            .get(method_not_allowed)
-            .delete(method_not_allowed),
-    )
+    Router::new()
+        .route(
+            "/mcp",
+            axum::routing::post(handle_mcp)
+                .get(method_not_allowed)
+                .delete(method_not_allowed),
+        )
+        .merge(super::mcp_oauth::public_router())
 }
 
-/// Key management, mounted under the JWT-protected API.
+/// Key management and OAuth consent, mounted under the JWT-protected API.
 pub fn management_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/mcp/keys", get(list_keys).post(create_key))
         .route("/mcp/keys/{id}", delete(revoke_key))
         .route("/mcp/calls", get(list_calls))
+        .merge(super::mcp_oauth::consent_router())
 }
 
 async fn method_not_allowed() -> StatusCode {
@@ -69,13 +73,17 @@ async fn method_not_allowed() -> StatusCode {
 // Keys
 // ---------------------------------------------------------------------------
 
-fn generate_secret() -> String {
-    let mut bytes = [0u8; 32];
+pub(super) fn random_hex(len: usize) -> String {
+    let mut bytes = vec![0u8; len];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    format!("{KEY_PREFIX}{}", to_hex(&bytes))
+    to_hex(&bytes)
 }
 
-fn hash_secret(secret: &str) -> String {
+pub(super) fn generate_secret() -> String {
+    format!("{KEY_PREFIX}{}", random_hex(32))
+}
+
+pub(super) fn hash_secret(secret: &str) -> String {
     to_hex(&Sha256::digest(secret.as_bytes()))
 }
 
@@ -83,7 +91,7 @@ fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn key_repository(state: &AppState) -> ApiResult<&Arc<McpKeyRepository>> {
+pub(super) fn key_repository(state: &AppState) -> ApiResult<&Arc<McpKeyRepository>> {
     state.mcp_key_repository.as_ref().ok_or_else(|| {
         ApiError::NotImplemented("The MCP endpoint requires the PostgreSQL storage".to_string())
     })
@@ -151,10 +159,16 @@ async fn list_calls(
 // JSON-RPC transport
 // ---------------------------------------------------------------------------
 
-fn unauthorized(message: &str) -> Response {
+/// 401 pointing OAuth-capable clients to the discovery document (RFC 9728).
+fn unauthorized(headers: &HeaderMap, message: &str) -> Response {
+    let challenge = format!(
+        "Bearer resource_metadata=\"{}\"",
+        super::mcp_oauth::resource_metadata_url(headers)
+    );
+    let challenge = HeaderValue::from_str(&challenge).unwrap_or(HeaderValue::from_static("Bearer"));
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
+        [(header::WWW_AUTHENTICATE, challenge)],
         Json(json!({ "error": message })),
     )
         .into_response()
@@ -186,11 +200,11 @@ async fn handle_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body
         .map(str::trim)
         .filter(|secret| secret.starts_with(KEY_PREFIX))
     else {
-        return unauthorized("Missing Orus API key");
+        return unauthorized(&headers, "Missing Orus API key");
     };
     let key = match repo.authenticate(&hash_secret(secret)) {
         Ok(Some(key)) => key,
-        Ok(None) => return unauthorized("Invalid or revoked Orus API key"),
+        Ok(None) => return unauthorized(&headers, "Invalid or revoked Orus API key"),
         Err(e) => {
             tracing::error!("MCP key authentication failed: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();

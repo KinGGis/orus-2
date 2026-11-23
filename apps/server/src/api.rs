@@ -41,6 +41,8 @@ mod limits;
 mod market_data;
 #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
 mod mcp;
+#[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+mod mcp_oauth;
 mod net_worth;
 mod performance;
 mod portfolio;
@@ -180,8 +182,12 @@ pub fn app_router(state: Arc<AppState>, config: &Config) -> Router {
 
     let api = api.with_state(state.clone());
 
-    Router::new()
-        .nest("/api/v1", api)
+    let root = Router::new().nest("/api/v1", api);
+    // OAuth discovery documents must sit at the origin root.
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    let root = root.merge(mcp_oauth::well_known_router());
+
+    root
         .with_state(state)
         .layer(cors)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))

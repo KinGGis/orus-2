@@ -57,8 +57,10 @@ export default function OrusLoginPage() {
         }
         return;
       }
-      // Redirect to dashboard on success
-      navigate("/administration");
+      // Redirect to dashboard on success, or back to a pending OAuth consent
+      const returnTo = sessionStorage.getItem("orus.returnTo");
+      sessionStorage.removeItem("orus.returnTo");
+      navigate(returnTo ?? "/administration");
     } catch (err) {
       setError(
         err instanceof Error && err.message

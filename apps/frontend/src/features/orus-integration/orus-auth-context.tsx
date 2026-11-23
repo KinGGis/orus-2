@@ -582,6 +582,13 @@ export function OrusAuthGuard({ children }: OrusAuthGuardProps) {
   }
 
   if (!isAuthenticated) {
+    // Resume an OAuth consent (MCP agents) once logged in.
+    if (window.location.pathname.startsWith("/oauth/")) {
+      sessionStorage.setItem(
+        "orus.returnTo",
+        window.location.pathname + window.location.search,
+      );
+    }
     window.location.href = "/login";
     return null;
   }
