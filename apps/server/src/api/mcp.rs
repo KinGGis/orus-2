@@ -2,7 +2,7 @@
 //! Cursor, custom agents…) can read Orus data, query IBKR and run operations.
 //!
 //! Transport: stateless Streamable HTTP answering with plain JSON (no SSE).
-//! Authentication: `Authorization: Bearer orus_…` API keys created in the
+//! Authentication: `Authorization: Bearer orus_…` (or `x-api-key: orus_…`) API keys created in the
 //! settings, each with a READ or WRITE scope. Every tool call is journaled.
 
 use std::sync::Arc;
@@ -181,6 +181,8 @@ async fn handle_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
+        // Some clients (e.g. Claude Desktop connectors) reserve `Authorization` for OAuth.
+        .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
         .map(str::trim)
         .filter(|secret| secret.starts_with(KEY_PREFIX))
     else {
