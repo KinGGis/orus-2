@@ -45,8 +45,10 @@ export default function OrusAuthCallbackPage() {
 
         if (session) {
           console.log("[OrusAuth] Session established, redirecting to dashboard");
-          // Successful authentication, redirect to dashboard
-          navigate("/");
+          // Successful authentication, redirect to dashboard or a pending OAuth consent
+          const returnTo = sessionStorage.getItem("orus.returnTo");
+          sessionStorage.removeItem("orus.returnTo");
+          navigate(returnTo ?? "/");
         } else {
           // No session, might be email verification
           const type = searchParams.get("type");

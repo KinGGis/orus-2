@@ -31,6 +31,7 @@ import AboutSettingsPage from "./pages/settings/about/about-page";
 import AddonSettingsPage from "./pages/settings/addons/addon-settings";
 import AiProvidersPage from "./pages/settings/ai-providers/ai-providers-page";
 import McpSettingsPage from "./pages/settings/mcp/mcp-settings-page";
+import McpAuthorizePage from "./pages/oauth/mcp-authorize-page";
 import ContributionLimitPage from "./pages/settings/contribution-limits/contribution-limits-page";
 import ExportSettingsPage from "./pages/settings/exports/exports-page";
 import GeneralSettingsPage from "./pages/settings/general/general-page";
@@ -107,6 +108,16 @@ export function AppRoutes() {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/auth/orus/callback" element={<AppAuthCallbackPage />} />
+
+        {/* OAuth consent for MCP agents - No layout needed */}
+        <Route
+          path="/oauth/authorize"
+          element={
+            <OrusAuthGuard>
+              <McpAuthorizePage />
+            </OrusAuthGuard>
+          }
+        />
 
         {/* Onboarding with dedicated layout */}
         <Route path="/onboarding" element={<OnboardingLayout />}>

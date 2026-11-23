@@ -24,6 +24,9 @@ services:
         sync: false
       - key: WF_CORS_ALLOW_ORIGINS
         sync: false
+      # Orus web app origin hosting the MCP OAuth consent page (e.g. the Vercel URL)
+      - key: WF_PUBLIC_APP_URL
+        sync: false
       - key: WF_SECRET_KEY
         generateValue: true
       - key: WF_AUTH_PASSWORD_HASH

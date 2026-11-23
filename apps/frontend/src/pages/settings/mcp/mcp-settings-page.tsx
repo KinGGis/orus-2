@@ -268,7 +268,9 @@ export default function McpSettingsPage() {
           <CardTitle className="text-base">Connecter un agent</CardTitle>
           <CardDescription>
             Point d'accès MCP (Streamable HTTP), authentifié par l'en-tête{" "}
-            <code>Authorization: Bearer orus_…</code>.
+            <code>Authorization: Bearer orus_…</code> (ou <code>x-api-key</code>), ou par OAuth : dans
+            Claude (Connecteurs personnalisés), saisissez seulement l'URL du serveur Orus, sans clé, puis
+            autorisez l'accès depuis Orus.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
