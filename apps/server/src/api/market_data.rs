@@ -76,7 +76,7 @@ async fn get_quote_history(
     Ok(Json(res))
 }
 
-async fn update_quote(
+pub(super) async fn update_quote(
     Path(symbol): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(mut quote): Json<Quote>,
