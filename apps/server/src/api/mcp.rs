@@ -23,8 +23,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use wealthfolio_core::accounts::AccountServiceTrait;
-use wealthfolio_core::activities::{ActivityUpdate, NewActivity};
+use wealthfolio_core::activities::{ActivityBulkMutationRequest, ActivityUpdate, NewActivity};
+use wealthfolio_core::assets::NewAsset;
 use wealthfolio_core::private_debt::PrivateDebtImportRequest;
+use wealthfolio_core::quotes::Quote;
 use wealthfolio_storage_postgres::mcp::{McpApiKey, McpKeyRepository, NewMcpApiKey, NewMcpAuditEntry};
 
 use crate::{
@@ -42,7 +44,7 @@ const MAX_LOGGED_ARGUMENT_BYTES: usize = 8 * 1024;
 const INSTRUCTIONS: &str = "Orus is the portfolio management system of the fund. \
 Use get_accounts first to obtain account ids. Amounts are in the account currency unless stated. \
 Tools prefixed with ibkr_ are relayed to Interactive Brokers. \
-Write tools (activities, accounts, syncs, imports, IBKR orders) need a WRITE key.";
+Write tools (activities, accounts, assets, manual quotes, syncs, imports, IBKR orders) need a WRITE key.";
 
 /// Public MCP endpoint: authenticated by its own API keys, not by the session JWT.
 pub fn router() -> Router<Arc<AppState>> {
@@ -371,6 +373,91 @@ fn native_write_tools() -> Vec<Value> {
             }),
         ),
         tool(
+            "update_account",
+            "Change an account: rename, regroup, archive (isArchived) or deactivate it. \
+             Only the fields sent are changed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "accountId": { "type": "string" },
+                    "name": { "type": "string" },
+                    "accountType": { "type": "string", "enum": ["SECURITIES", "CASH", "CRYPTOCURRENCY"] },
+                    "group": { "type": "string" },
+                    "isActive": { "type": "boolean" },
+                    "isArchived": { "type": "boolean" },
+                    "trackingMode": { "type": "string", "enum": ["TRANSACTIONS", "HOLDINGS", "NOT_SET"] },
+                    "platformId": { "type": "string" },
+                    "accountNumber": { "type": "string" }
+                },
+                "required": ["accountId"]
+            }),
+        ),
+        tool(
+            "save_activities",
+            "Create, update and delete many activities in one call. Updates must be complete activities. \
+             Entries that fail are listed in errors; the others are saved.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "creates": {
+                        "type": "array",
+                        "items": { "type": "object", "properties": activity_properties }
+                    },
+                    "updates": {
+                        "type": "array",
+                        "items": { "type": "object", "properties": update_properties }
+                    },
+                    "deleteIds": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        ),
+        tool(
+            "create_asset",
+            "Create an asset without recording an activity, e.g. an unlisted security priced manually. \
+             Listed securities use kind INVESTMENT with instrumentType, instrumentSymbol and quoteMode MARKET.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["INVESTMENT", "PROPERTY", "VEHICLE", "COLLECTIBLE", "PRECIOUS_METAL",
+                                 "PRIVATE_EQUITY", "LIABILITY", "OTHER"]
+                    },
+                    "name": { "type": "string" },
+                    "displayCode": { "type": "string", "description": "Short code shown in the UI" },
+                    "quoteMode": { "type": "string", "enum": ["MARKET", "MANUAL"] },
+                    "quoteCcy": { "type": "string" },
+                    "instrumentType": {
+                        "type": "string",
+                        "enum": ["EQUITY", "CRYPTO", "FX", "OPTION", "METAL", "BOND"]
+                    },
+                    "instrumentSymbol": { "type": "string" },
+                    "instrumentExchangeMic": { "type": "string" },
+                    "notes": { "type": "string" }
+                },
+                "required": ["kind", "quoteMode", "quoteCcy"]
+            }),
+        ),
+        tool(
+            "set_manual_quote",
+            "Record or replace the manual price of an asset on a date. Valuations are then rebuilt \
+             in the background. open/high/low default to close.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "assetId": { "type": "string" },
+                    "date": { "type": "string", "format": "date" },
+                    "close": { "type": "number" },
+                    "currency": { "type": "string" },
+                    "open": { "type": "number" },
+                    "high": { "type": "number" },
+                    "low": { "type": "number" },
+                    "notes": { "type": "string" }
+                },
+                "required": ["assetId", "date", "close", "currency"]
+            }),
+        ),
+        tool(
             "sync_ibkr",
             "Start a full Interactive Brokers synchronisation (activities, positions, NAV). \
              Runs in the background and returns immediately.",
@@ -581,6 +668,26 @@ async fn run_tool(state: &Arc<AppState>, name: &str, arguments: Value) -> Option
             None => Err("Missing activityId".to_string()),
         },
         "create_account" => create_account(state, arguments).await,
+        "update_account" => update_account(state, arguments).await,
+        "save_activities" => match parse_args::<ActivityBulkMutationRequest>(arguments) {
+            Ok(request) => state
+                .activity_service
+                .bulk_mutate_activities(request)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(ok_json),
+            Err(e) => Err(e),
+        },
+        "create_asset" => match parse_args::<NewAsset>(arguments) {
+            Ok(asset) => state
+                .asset_service
+                .create_asset(asset)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(ok_json),
+            Err(e) => Err(e),
+        },
+        "set_manual_quote" => set_manual_quote(state, arguments).await,
         "sync_ibkr" => super::ibkr::sync_ibkr(State(state.clone()))
             .await
             .map_err(|e| e.to_string())
@@ -626,6 +733,72 @@ async fn create_account(state: &Arc<AppState>, mut arguments: Value) -> Result<V
         .await
         .map_err(|e| e.to_string())?;
     ok_json(crate::models::Account::from(created))
+}
+
+const UPDATABLE_ACCOUNT_FIELDS: [&str; 8] = [
+    "name", "accountType", "group", "isActive", "isArchived", "trackingMode", "platformId", "accountNumber",
+];
+
+/// Applies the fields sent on top of the stored account, as the update replaces it whole.
+async fn update_account(state: &Arc<AppState>, arguments: Value) -> Result<Value, String> {
+    let id = arguments
+        .get("accountId")
+        .and_then(Value::as_str)
+        .ok_or("Missing accountId")?
+        .to_string();
+    let existing = state.account_service.get_account(&id).map_err(|e| e.to_string())?;
+    let mut merged =
+        serde_json::to_value(crate::models::Account::from(existing)).map_err(|e| e.to_string())?;
+    if let Some(changes) = arguments.as_object() {
+        for field in UPDATABLE_ACCOUNT_FIELDS {
+            if let Some(value) = changes.get(field) {
+                merged[field] = value.clone();
+            }
+        }
+    }
+    let update = parse_args::<crate::models::AccountUpdate>(merged)?;
+    let updated = state
+        .account_service
+        .update_account(update.into())
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(crate::models::Account::from(updated))
+}
+
+/// Goes through the HTTP handler so the valuation rebuild it triggers also runs.
+async fn set_manual_quote(state: &Arc<AppState>, arguments: Value) -> Result<Value, String> {
+    let asset_id = arguments
+        .get("assetId")
+        .and_then(Value::as_str)
+        .ok_or("Missing assetId")?
+        .to_string();
+    let date = parse_date(&arguments, "date")?.ok_or("Missing date")?;
+    let close = arguments.get("close").cloned().ok_or("Missing close")?;
+    let price = |field: &str| arguments.get(field).cloned().unwrap_or_else(|| close.clone());
+    let quote = parse_args::<Quote>(json!({
+        "id": "",
+        "assetId": asset_id,
+        "timestamp": format!("{date}T12:00:00Z"),
+        "open": price("open"),
+        "high": price("high"),
+        "low": price("low"),
+        "close": close,
+        "adjclose": close,
+        "volume": 0,
+        "currency": arguments.get("currency"),
+        "dataSource": "MANUAL",
+        "createdAt": Utc::now(),
+        "notes": arguments.get("notes"),
+    }))?;
+    super::market_data::update_quote(Path(asset_id.clone()), State(state.clone()), Json(quote))
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_json(json!({
+        "assetId": asset_id,
+        "date": date,
+        "close": close,
+        "message": "Manual quote saved, portfolio valuation rebuild started"
+    }))
 }
 
 fn parse_date(arguments: &Value, field: &str) -> Result<Option<NaiveDate>, String> {
@@ -688,6 +861,9 @@ mod tests {
         assert!(is_write_tool("ibkr_delete_alert"));
         assert!(is_write_tool("create_activity"));
         assert!(is_write_tool("import_private_debt"));
+        for name in ["update_account", "save_activities", "create_asset", "set_manual_quote"] {
+            assert!(is_write_tool(name), "{name} must need a WRITE key");
+        }
         assert!(!is_write_tool("get_holdings"));
         assert!(!is_write_tool("get_private_debt_schedule"));
     }
