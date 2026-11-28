@@ -35,6 +35,7 @@ export const COMMANDS: CommandMap = {
   get_historical_valuations: { method: "GET", path: "/valuations/history" },
   get_latest_valuations: { method: "GET", path: "/valuations/latest" },
   get_portfolio_allocations: { method: "GET", path: "/allocations" },
+  get_holdings_by_allocation: { method: "GET", path: "/allocations/holdings" },
   // Snapshot management
   get_snapshots: { method: "GET", path: "/snapshots" },
   get_snapshot_by_date: { method: "GET", path: "/snapshots/holdings" },
@@ -378,6 +379,19 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       const { accountId } = payload as { accountId: string };
       const params = new URLSearchParams();
       params.set("accountId", accountId);
+      url += `?${params.toString()}`;
+      break;
+    }
+    case "get_holdings_by_allocation": {
+      const { accountId, taxonomyId, categoryId } = payload as {
+        accountId: string;
+        taxonomyId: string;
+        categoryId: string;
+      };
+      const params = new URLSearchParams();
+      params.set("accountId", accountId);
+      params.set("taxonomyId", taxonomyId);
+      params.set("categoryId", categoryId);
       url += `?${params.toString()}`;
       break;
     }
