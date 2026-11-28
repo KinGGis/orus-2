@@ -583,6 +583,12 @@ impl AllocationServiceTrait for AllocationService {
                 continue;
             }
 
+            // Cash is only classified via the branch above (mirrors aggregate_by_taxonomy);
+            // its synthetic id has no assignments, so it must not fall into "Unknown".
+            if holding.holding_type == HoldingType::Cash {
+                continue;
+            }
+
             // Check if this holding matches the category
             if category_id == "__UNKNOWN__" {
                 // For "Unknown", include holdings with no assignment for this taxonomy
