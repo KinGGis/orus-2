@@ -357,7 +357,8 @@ fn native_write_tools() -> Vec<Value> {
         ),
         tool(
             "create_account",
-            "Create a portfolio account.",
+            "Create a portfolio account. currency must be a 3-letter ISO fiat code (USD, EUR…); \
+             crypto and stablecoins (USDT…) are assets held in the account, not its currency.",
             json!({
                 "type": "object",
                 "properties": {
@@ -721,7 +722,21 @@ async fn run_ai_tool(state: &Arc<AppState>, name: &str, arguments: Value) -> Opt
     )
 }
 
+/// Account currencies are converted with FX rates and formatted as ISO 4217 codes, so a
+/// stablecoin or crypto ticker (USDT, USDC…) would break both.
+fn check_account_currency(currency: Option<&str>) -> Result<(), String> {
+    match currency {
+        Some(c) if c.len() == 3 && c.chars().all(|ch| ch.is_ascii_uppercase()) => Ok(()),
+        other => Err(format!(
+            "Invalid account currency {other:?}: use a 3-letter ISO 4217 fiat code (USD, EUR…). \
+             Crypto and stablecoins such as USDT are assets held in the account: record them with \
+             create_activity (symbol e.g. USDT-USD, instrumentType CRYPTO)."
+        )),
+    }
+}
+
 async fn create_account(state: &Arc<AppState>, mut arguments: Value) -> Result<Value, String> {
+    check_account_currency(arguments.get("currency").and_then(Value::as_str))?;
     if let Some(object) = arguments.as_object_mut() {
         object.entry("isDefault").or_insert(json!(false));
         object.entry("isActive").or_insert(json!(true));
@@ -861,6 +876,10 @@ mod tests {
         assert!(is_write_tool("ibkr_delete_alert"));
         assert!(is_write_tool("create_activity"));
         assert!(is_write_tool("import_private_debt"));
+        assert!(check_account_currency(Some("USD")).is_ok());
+        assert!(check_account_currency(Some("USDT")).is_err());
+        assert!(check_account_currency(Some("usd")).is_err());
+        assert!(check_account_currency(None).is_err());
         for name in ["update_account", "save_activities", "create_asset", "set_manual_quote"] {
             assert!(is_write_tool(name), "{name} must need a WRITE key");
         }
